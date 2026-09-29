@@ -1,0 +1,3 @@
+[submodule "external/Backgammon-NN"]
+	path = external/Backgammon-NN
+	url = https://github.com/Chris-Whittington-Chess/Backgammon-NN.git
