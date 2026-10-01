@@ -12,13 +12,14 @@ struct BgBoard {
 };
 
 // NET_FLASH_SRAM: no-PSRAM chips - read the blob in place, but copy the dense
-// layer-2 matrix into internal SRAM as two halves (no 128 KB contiguous block).
+// layer-2 matrix into internal SRAM as four 32 KB chunks (no big contiguous block).
 enum NetPlace { NET_INTERNAL, NET_PSRAM, NET_FLASH, NET_FLASH_SRAM };
 
 struct BgNet {
   int n_in, h1, h2, n_heads;
   const float *W1T, *b1, *W2T, *b2, *WH, *bH;
-  const float* W2hi;  // rows h1/2.. of W2T (== W2T + h1/2*h2 unless split)
+  const float* W2c[4];  // layer-2 rows in 4 chunks of h1/4 (separate SRAM blocks if split)
+  void chunk_w2();
   // Load from the net.bin blob. INTERNAL puts the dense layer-2 and heads in
   // on-chip SRAM (layer 1 stays in PSRAM); FLASH reads the blob in place.
   bool load(const uint8_t* blob, NetPlace where);

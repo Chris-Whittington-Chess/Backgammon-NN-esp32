@@ -2,8 +2,8 @@
 // (lcdwiki E32R40T, sold as Hosyond): ESP32-D0WD-V3, no PSRAM, ST7796S 480x320
 // SPI, XPT2046 resistive touch on the same bus. Pins from lcdwiki.
 //
-// No PSRAM: the frame is rendered in 480x40 bands through one small sprite,
-// and the net is read from flash except its dense layer 2 (two 64 KB halves
+// No PSRAM: the frame is rendered in 480x20 bands through one small sprite,
+// and the net is read from flash except its dense layer 2 (four 32 KB chunks
 // in SRAM). Rules/movegen: common/bg.cpp (port of bgcore moves.rs).
 //
 // Play: you are white, moving 24 -> 1 (home bottom right). Tap the dice to
@@ -15,6 +15,7 @@
 // ("FRAME\n" + 480*320 LE RGB565).
 #include <LovyanGFX.hpp>
 #include <Preferences.h>
+#include <algorithm>
 #include "../common/bg.h"
 
 extern const uint8_t net_bin[] asm("_binary_data_net_bin_start");
@@ -76,7 +77,7 @@ static LGFX_Sprite cv(&lcd);
 static Preferences prefs;
 static BgNet net;
 static bool netOk;
-static const int W = 480, H = 320, BAND = 40;
+static const int W = 480, H = 320, BAND = 20;  // 19 KB sprite: the heap is fragmented
 static int oy = 0;  // y offset of the band being rendered
 
 // ---- game state (board always from the human's side: + = you) ----
@@ -98,6 +99,44 @@ static uint16_t C_FRAME, C_FELT, C_PTA, C_PTB, C_ME, C_MERIM, C_MEIN, C_OP, C_OP
     C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU;
 
 static int pips(const BgBoard& b, int side) { return bg_pip_count(b, side); }
+
+// Destinations for the selected checker, including ones that take several
+// dice (e.g. 11 pips with a 6-5): each is a chain of legal sub-moves by that
+// same checker. Fewest steps wins; on a tie the first chain found is kept.
+struct Path { int8_t to, n; BgSub step[4]; };
+static Path paths[24];
+static int npaths;
+
+static void reachFrom(const BgBoard& b, const int* dr, int dn, int at, Path& cur) {
+  static BgSub lvl[4][64];
+  BgSub* s = lvl[cur.n];
+  int k = bg_next_submoves(b, dr, dn, s, 64);
+  for (int i = 0; i < k; i++) {
+    if (s[i].from != at) continue;
+    Path p = cur;
+    p.step[p.n++] = s[i];
+    p.to = s[i].to;
+    int j = 0;
+    while (j < npaths && paths[j].to != p.to) j++;
+    if (j == npaths && npaths < 24) paths[npaths++] = p;
+    else if (j < npaths && p.n < paths[j].n) paths[j] = p;
+    if (p.to == 0) continue;  // borne off: this checker is done
+    int r2[4], n2 = 0;
+    bool dropped = false;
+    for (int d = 0; d < dn; d++) {
+      if (!dropped && dr[d] == s[i].die) { dropped = true; continue; }
+      r2[n2++] = dr[d];
+    }
+    if (n2) reachFrom(s[i].result, r2, n2, p.to, p);
+  }
+}
+
+static void computePaths() {
+  npaths = 0;
+  if (sel < 0) return;
+  Path start; start.n = 0; start.to = sel;
+  reachFrom(g, rem, nrem, sel, start);
+}
 
 // ---- geometry (480x320) ----
 static const int PW = 32;                  // point width
@@ -221,15 +260,17 @@ static void drawBand() {
     text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + 24 : MIDY);
   }
   // targets for the selected checker
+  // Filled dot: one die. Ring: several dice with the same checker.
   if (sel > 0) {
-    for (int i = 0; i < nsubs; i++) {
-      if (subs[i].from != sel) continue;
-      int t = subs[i].to;
+    for (int i = 0; i < npaths; i++) {
+      int t = paths[i].to, x, y;
       if (t > 0) {
         int c; bool top; pointGeom(t, c, top);
         int n = g.pts[t] > 0 ? min((int)g.pts[t], 4) : 0;
-        dot(colX(c) + PW / 2, stackY(top, n), 6, C_SEL);
-      } else dot(TRX + TRW / 2, FB - 8 - g.off[0] * 8 - 10, 6, C_SEL);
+        x = colX(c) + PW / 2; y = stackY(top, n);
+      } else { x = TRX + TRW / 2; y = FB - 8 - g.off[0] * 8 - 10; }
+      if (paths[i].n == 1) dot(x, y, 6, C_SEL);
+      else { dot(x, y, 7, C_SEL); dot(x, y, 4, C_FELT); }
     }
   }
   // status bar: pips | message | eval
@@ -298,7 +339,7 @@ static void startMove(int d1, int d2) {
   rem[nrem++] = d1; rem[nrem++] = d2;
   if (d1 == d2) { rem[nrem++] = d1; rem[nrem++] = d1; }
   turnStart = g;
-  sel = -1;
+  sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
   if (!nsubs) { phase = PASS; snprintf(msg, sizeof msg, "No legal move - tap to pass"); }
   else { phase = MOVE; snprintf(msg, sizeof msg, "Your move: %d-%d", d1, d2); }
@@ -328,14 +369,30 @@ static void endHumanTurn() {
   cpuTurn(random(1, 7), random(1, 7));
 }
 
-static void applySub(const BgSub& s) {
-  g = s.result;
-  for (int i = 0; i < nrem; i++) if (rem[i] == s.die) { rem[i] = rem[--nrem]; break; }
+static void applyPath(const Path& p) {
+  for (int k = 0; k < p.n; k++) {
+    g = p.step[k].result;
+    for (int i = 0; i < nrem; i++) if (rem[i] == p.step[k].die) { rem[i] = rem[--nrem]; break; }
+  }
   if (int r = bg_result(g)) { gameOver(r, true); return; }
-  sel = -1;
+  sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
   if (!nsubs) endHumanTurn();
-  else if (nrem) snprintf(msg, sizeof msg, "Tap the bar above to undo");
+  else snprintf(msg, sizeof msg, "Tap this bar to undo");
+}
+
+// Why a checker on point p (or the bar, 25) can't move right now.
+static const char* whyNot(int p) {
+  if (p != 25 && g.bar[0]) return "Enter from the bar first";
+  bool home = true;
+  for (int q = 7; q <= 24; q++) if (g.pts[q] > 0) home = false;
+  for (int i = 0; i < nrem; i++) {
+    int t = p - rem[i];
+    if (p != 25 && t < 1 && !home) return "Bring all checkers home first";
+    if (t >= 1 && g.pts[t] > -2) return "Must play both dice";  // legal alone, but not maximal
+    if (p == 25 && g.pts[25 - rem[i]] > -2) return "Must play the higher die";
+  }
+  return "That checker is blocked";
 }
 
 // ---- touch ----
@@ -383,17 +440,21 @@ static void tap(int x, int y) {
     return;
   }
   int s = hitSpot(x, y);
-  if (s < 0) { sel = -1; draw(); return; }
+  Serial.printf("tap %d,%d -> spot %d (sel %d)\n", x, y, s, sel);
   if (sel > 0) {
-    for (int i = 0; i < nsubs; i++)
-      if (subs[i].from == sel && subs[i].to == s) { applySub(subs[i]); draw(); return; }
+    for (int i = 0; i < npaths; i++)
+      if (paths[i].to == s) { applyPath(paths[i]); draw(); return; }
   }
-  sel = (s > 0 && s != sel && canMoveFrom(s)) ? s : -1;
-  // A single possible destination: move straight away.
-  if (sel > 0) {
-    int only = -1, cnt = 0;
-    for (int i = 0; i < nsubs; i++) if (subs[i].from == sel) { only = i; cnt++; }
-    if (cnt == 1) { applySub(subs[only]); }
+  if (s > 0 && s != sel && canMoveFrom(s)) {
+    sel = s;
+    computePaths();
+    if (npaths == 1) { applyPath(paths[0]); draw(); return; }  // only one place to go
+    snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
+  } else {
+    bool mine = s == 25 ? g.bar[0] > 0 : s > 0 && g.pts[s] > 0;
+    if (mine && s != sel) snprintf(msg, sizeof msg, "%s", whyNot(s));
+    else if (sel > 0 && s >= 0) snprintf(msg, sizeof msg, "Can't move there");
+    sel = -1; npaths = 0;
   }
   draw();
 }
@@ -456,7 +517,7 @@ static void dumpFrame() {
 
 void setup() {
   Serial.begin(921600);
-  netOk = net.load(net_bin, NET_FLASH_SRAM);  // grab the 64 KB halves first
+  netOk = net.load(net_bin, NET_FLASH_SRAM);  // grab the 32 KB chunks first
   lcd.init();
   lcd.setRotation(1);
   lcd.setBrightness(200);
@@ -488,13 +549,24 @@ void setup() {
 }
 
 void loop() {
+  // Resistive touch: the first samples of a press are unreliable, so collect
+  // the whole press and act on release at the median position.
+  static int16_t sx[64], sy[64];
+  static int ns = 0, idle = 0;
   int32_t x, y;
-  static bool down = false;
-  bool now = lcd.getTouch(&x, &y);
-  if (now && !down && netOk) tap(x, y);
-  down = now;
+  if (lcd.getTouch(&x, &y)) {
+    if (ns < 64) { sx[ns] = x; sy[ns] = y; ns++; }
+    idle = 0;
+  } else if (ns && ++idle >= 3) {  // ~30 ms without contact = released
+    int skip = ns > 4 ? 2 : 0, m = ns - skip;
+    std::sort(sx + skip, sx + ns);
+    std::sort(sy + skip, sy + ns);
+    if (netOk) tap(sx[skip + m / 2], sy[skip + m / 2]);
+    ns = 0;
+  }
   if (Serial.available()) {
     int ch = Serial.read();
+    if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
     else if (ch == 'd') dumpFrame();
