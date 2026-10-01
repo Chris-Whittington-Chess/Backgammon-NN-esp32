@@ -1,4 +1,4 @@
-﻿// On-device parity + timing for the Backgammon-NN value net.
+// On-device parity + timing for the Backgammon-NN value net.
 // Runs at boot (results on screen) and again on serial 'b' (results on serial).
 #include <M5Unified.h>
 #include <esp_timer.h>

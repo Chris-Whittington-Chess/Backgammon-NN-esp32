@@ -1,4 +1,4 @@
-﻿"""Export the live Backgammon-NN value net for the CoreS3, plus parity tests.
+"""Export the live Backgammon-NN value net for the CoreS3, plus parity tests.
 
 Weights and model code come from the Backgammon-NN submodule (external/).
 Run with a Backgammon-NN venv that has torch + the bgcore bindings built:

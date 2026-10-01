@@ -1,5 +1,6 @@
-﻿.pio/
+.pio/
 .vscode/
 *.png
 __pycache__/
 
+backup/

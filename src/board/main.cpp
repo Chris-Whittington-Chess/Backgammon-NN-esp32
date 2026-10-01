@@ -1,4 +1,4 @@
-﻿// Backgammon board on the CoreS3's 320x240 display.
+// Backgammon board on the CoreS3's 320x240 display.
 // Touch: tap a point with your checkers to select it (targets shown as dots),
 // tap a dot (or the tray for bear-off) to move, tap the dice to roll,
 // tap the status bar to cycle preset positions.
