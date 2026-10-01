@@ -23,22 +23,57 @@ pio run -e e32r40t -t upload
 
 You are white, moving 24 -> 1 (home board bottom right); the CPU plays the net at 0-ply.
 
-- Tap the dice (ROLL) to roll. Points you can move from get a yellow bar at their base.
-- Tap a checker, then a yellow dot (one die) or ring (several dice with that checker); tap the
-  tray to bear off. A checker with only one destination moves straight away. Taps snap to the
-  nearest target / movable column, and a white cross shows where the touch registered.
-- The CPU's last move is marked in orange: rings where checkers left, dots where they landed.
-- **Doubling cube** (money play): before rolling, tap the cube in the bar (yellow rim = you may
-  double). The CPU doubles before its roll and you get Take / Drop.
-- **Menu** (top left): Resume, New game, Take back (this turn, or your previous turn including
-  the CPU's reply and any cube action), Hint (best move in cyan; before rolling: cube advice),
-  Reset score, Calibrate touch.
+**Your turn**
 
-Touch calibration runs on first boot and is stored in NVS.
+1. **Roll:** tap the dice when ROLL blinks in the tray. The dice tumble, then settle.
+2. **Move:** points you can move from get a yellow bar at their base (the bar too, when you have
+   a checker on it). Tap a checker to select it, then tap where it goes:
+   - a yellow **dot** = a move with one die,
+   - a yellow **ring** = a move using several dice with that checker (e.g. 13 to 2 with 6-5),
+   - the **tray** to bear off.
+
+   Nothing moves until you tap a destination. Tap another movable checker to switch, or empty
+   space to deselect. Used dice turn grey; with doubles a count shows how many are left.
+3. **Finish:** after your last checker the dice grey out and DONE blinks under them. Tap the
+   dice to hand over to the CPU - until then you can still undo (see the menu).
+
+If a move is refused, the status bar says why ("Must play both dice", "Enter from the bar
+first", ...). Taps snap to the nearest target or movable column (resistive touch is a few
+pixels out), and a small white cross shows where each touch registered.
+
+**The CPU's turn**
+
+Its dice tumble, then its checkers slide one at a time; a hit blot flies to the bar. Afterwards
+orange marks show its move: rings where checkers left, dots where they landed. With no legal
+move, the status message pulses - tap to pass.
+
+**Doubling cube** (money play)
+
+- Before rolling, tap the cube in the bar to double. A yellow surround means you may (cube
+  centred or yours). The CPU takes or drops.
+- The CPU may double before its roll: a panel shows your cubeless chances, with Take / Drop.
+- The cube sits at the owner's end of the bar; wins are multiplied by it, a drop scores the
+  current value.
+
+**Menu** (the three lines, top left; tap outside the panel to close it)
+
+| Button | |
+|---|---|
+| Undo step | Undo the last checker you moved this turn and get its dice back; press again to go further |
+| New game | Start again (the score is kept) |
+| Undo move | Undo your whole turn so far; if you haven't moved (or the CPU has replied), go back to the start of your previous turn, undoing the CPU's move and any cube action |
+| Hint | Your turn: the best move in cyan (rings = from, dots = to). Before rolling: cube advice |
+| Reset score | Score back to 0-0 |
+| Calibrate touch | Re-run the 4-corner touch calibration |
+
+When a game ends the status message pulses with the result and score; tap to start the next
+game. Touch calibration also runs on first boot and is stored in NVS.
 
 ### How it fits without PSRAM
 
-- The frame is drawn in 480x20 bands through one 19 KB sprite.
+- The frame is drawn in 480x20 bands through one 19 KB sprite. Animation redraws only the bands
+  a moving piece crosses, clipped to its columns (~140 fps); fonts are anti-aliased DejaVu Sans
+  rendered by `tools/make_fonts.py`.
 - The net is read from flash in place, except the dense layer-2 matrix (128 KB, read in full
   every eval), which is copied to SRAM as four 32 KB chunks - the heap is too fragmented for
   bigger blocks.
