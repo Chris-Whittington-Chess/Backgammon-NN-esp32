@@ -1186,6 +1186,29 @@ void loop() {
       else { phase = ROLL; snprintf(msg, sizeof msg, "Test: you lead 60-75"); }
       draw();
     }
+    else if (ch == 'a') {
+      // Self-play: the net plays both sides for N exchanges (yours, then the CPU's) with
+      // random dice, the last CPU move shown as usual - real-game positions for screenshots.
+      int n = Serial.parseInt();
+      for (int i = 0; i < n && phase != OVER; i++) {
+        int d1 = phase == MOVE ? dice[0] : random(1, 7), d2 = phase == MOVE ? dice[1] : random(1, 7);
+        int k = bg_genmoves(g, d1, d2, kids, 1024);
+        g = kids[bg_best(net, kids, k)];
+        if (int r = bg_result(g)) { gameOver(r, true); break; }
+        if (i < n - 1) {
+          BgBoard me = bg_swap(g);
+          int m = bg_genmoves(me, random(1, 7), random(1, 7), kids, 1024);
+          BgBoard nb = kids[bg_best(net, kids, m)];
+          g = bg_swap(nb);
+          if (int r = bg_result(nb)) { gameOver(r, false); break; }
+          phase = ROLL;
+        } else {
+          cpuTurn(random(1, 7), random(1, 7));
+        }
+      }
+      nhist = 0; hintMarks = false; dice[0] = dice[1] = 0;
+      draw();
+    }
     else if (ch == 'd') dumpFrame();
     else if (ch == 'k') { calibrate(); draw(); }
     else if (ch == 't') { int tx = Serial.parseInt(), ty = Serial.parseInt(); tap(tx, ty); Serial.printf("tap %d %d phase=%d sel=%d\n", tx, ty, phase, sel); }

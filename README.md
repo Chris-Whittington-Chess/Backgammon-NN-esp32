@@ -3,11 +3,15 @@
 Play backgammon against the [Backgammon-NN](https://github.com/Chris-Whittington-Chess/Backgammon-NN)
 value net on a cheap ESP32 touchscreen board.
 
-Engine source and trained weights come from the public Backgammon-NN repo, pinned as a submodule
-in `external/Backgammon-NN`:
+Website: [whittingtonchess.com/retro-backgammon.html](https://whittingtonchess.com/retro-backgammon.html).
+
+The trained network ships ready to use in `data/net.bin`, so building and flashing needs only this
+repo. The engine and its training live in the [Backgammon-NN](https://github.com/Chris-Whittington-Chess/Backgammon-NN)
+repo, pinned as a submodule in `external/Backgammon-NN`; you need it only to re-export the net
+(see [Net export](#net-export)):
 
 ```
-git clone --recurse-submodules <this repo>
+git clone --recurse-submodules https://github.com/Chris-Whittington-Chess/Backgammon-NN-esp32
 ```
 
 ## Board: 4.0" ESP32-32E display (`e32r40t`)
@@ -109,7 +113,8 @@ move-choice mismatches; 3.7 ms/eval, ~84 ms per average CPU move, ~1 s for the l
 (344 legal moves).
 
 Other serial commands: `n` new game, `t X Y` simulated tap, `d` dump the frame (see
-`tools/grab.py`), `k` recalibrate. Test positions: `g` / `h` cube races, `p` closed out (pass),
+`tools/grab.py`), `k` recalibrate, `a N` self-play (the net plays both sides for N exchanges
+with random dice, the last CPU move shown as usual - real-game positions for screenshots). Test positions: `g` / `h` cube races, `p` closed out (pass),
 `q` about to be gammoned (resign), `r` CPU hopeless (it resigns).
 
 ## Net export
@@ -120,3 +125,16 @@ After bumping the submodule, with a Backgammon-NN Python env (torch + `bgcore` b
 python tools/export_net.py         # data/net.bin
 python tools/export_movetests.py   # data/movetests.bin
 ```
+
+## Licence
+
+Copyright 2026 Chris Whittington. Licensed under the [Apache License 2.0](LICENSE), including the
+trained network in `data/net.bin`.
+
+You may use, modify and share this code and the programs built from it, including commercially -
+but anything you distribute, as source or as a compiled program, must carry the [NOTICE](NOTICE)
+file crediting Chris Whittington (in a NOTICE file, its documentation, or a screen the program
+shows). Third-party parts (the LovyanGFX library, the DejaVu fonts) keep their own licences: see
+[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
+
+The Backgammon-NN submodule is a separate repo under its own licence, which this one does not change.
