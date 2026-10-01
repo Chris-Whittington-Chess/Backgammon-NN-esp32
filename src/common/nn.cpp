@@ -73,7 +73,17 @@ bool BgNet::load(const uint8_t* blob, NetPlace where) {
   if (where == NET_FLASH) {
     if ((uintptr_t)blob & 3) return false;
     W1T = s[0]; b1 = s[1]; W2T = s[2]; b2 = s[3]; WH = s[4]; bH = s[5];
+    W2hi = W2T + (size_t)(h1 / 2) * h2;
     return true;
+  }
+  if (where == NET_FLASH_SRAM) {
+    if ((uintptr_t)blob & 3) return false;
+    const uint32_t IN = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    size_t half = (size_t)(h1 / 2) * h2;
+    W1T = s[0]; b1 = s[1]; b2 = s[3]; WH = s[4]; bH = s[5];
+    W2T = copy_to(s[2], half, IN);
+    W2hi = copy_to(s[2] + half, half, IN);
+    return W2T && W2hi;
   }
   const uint32_t PS = MALLOC_CAP_SPIRAM, IN = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   // INTERNAL: only the dense layer-2 matrix (128 KB, read in full every eval)
@@ -84,6 +94,7 @@ bool BgNet::load(const uint8_t* blob, NetPlace where) {
   b2 = copy_to(s[3], n[3], PS);
   WH = copy_to(s[4], n[4], PS);
   bH = copy_to(s[5], n[5], PS);
+  W2hi = W2T ? W2T + (size_t)(h1 / 2) * h2 : nullptr;
   return W1T && b1 && W2T && b2 && WH && bH;
 }
 
@@ -208,7 +219,7 @@ void BgNet::eval(const BgBoard& b, float probs[6], int* route_out) const {
   for (int k = 0; k < h1; k++) {
     float x = a1[k];
     if (x <= 0) continue;
-    const float* w = W2T + (size_t)k * h2;
+    const float* w = k < h1 / 2 ? W2T + (size_t)k * h2 : W2hi + (size_t)(k - h1 / 2) * h2;
     for (int j = 0; j < h2; j++) a2[j] += x * w[j];
   }
   for (int j = 0; j < h2; j++) if (a2[j] < 0) a2[j] = 0;

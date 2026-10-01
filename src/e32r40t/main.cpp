@@ -1,17 +1,24 @@
-// Backgammon board on the 4.0" ESP32-32E display (lcdwiki E32R40T, sold as
-// Hosyond): ESP32-D0WD-V3, no PSRAM, ST7796S 480x320 SPI, XPT2046 resistive
-// touch on the same bus. Pins from lcdwiki "4.0inch ESP32-32E Display".
+// Backgammon vs the Backgammon-NN net (0-ply) on the 4.0" ESP32-32E display
+// (lcdwiki E32R40T, sold as Hosyond): ESP32-D0WD-V3, no PSRAM, ST7796S 480x320
+// SPI, XPT2046 resistive touch on the same bus. Pins from lcdwiki.
 //
-// No PSRAM means no full-frame sprite (300 KB), so the frame is rendered in
-// four 480x80 bands through one 77 KB sprite.
+// No PSRAM: the frame is rendered in 480x40 bands through one small sprite,
+// and the net is read from flash except its dense layer 2 (two 64 KB halves
+// in SRAM). Rules/movegen: common/bg.cpp (port of bgcore moves.rs).
 //
-// Touch: first boot (or serial 'k') runs a 4-corner calibration, saved in NVS.
-// Tap the status bar to cycle positions, the dice to roll, a point then a
-// yellow dot to move (the tray to bear off).
-// Serial (921600): 'n' next preset, 'r' roll, 't X Y' simulated tap,
-// 'k' recalibrate, 'd' dump frame ("FRAME\n" + 480*320 LE RGB565).
+// Play: you are white, moving 24 -> 1 (home bottom right). Tap the dice to
+// roll, a highlighted point (or the bar) to pick a checker, then a yellow dot
+// (or the tray to bear off). Tap the status bar to undo your turn so far.
+// Touch calibration runs on first boot (or serial 'k'), saved in NVS.
+// Serial (921600): 'v' verify movegen + move choice against bgcore and time
+// it, 'n' new game, 't X Y' simulated tap, 'k' recalibrate, 'd' dump frame
+// ("FRAME\n" + 480*320 LE RGB565).
 #include <LovyanGFX.hpp>
 #include <Preferences.h>
+#include "../common/bg.h"
+
+extern const uint8_t net_bin[] asm("_binary_data_net_bin_start");
+extern const uint8_t movetests_bin[] asm("_binary_data_movetests_bin_start");
 
 class LGFX : public lgfx::LGFX_Device {
   lgfx::Panel_ST7796 panel;
@@ -67,135 +74,80 @@ class LGFX : public lgfx::LGFX_Device {
 static LGFX lcd;
 static LGFX_Sprite cv(&lcd);
 static Preferences prefs;
-static const int W = 480, H = 320, BAND = 80;
+static BgNet net;
+static bool netOk;
+static const int W = 480, H = 320, BAND = 40;
 static int oy = 0;  // y offset of the band being rendered
 
-// ---- position + rules (same as the CoreS3 board sketch) ----
-struct Pos {
-  int pts[25];
-  int bar[2];
-  int off[2];
-  int cube, cubeOwner;
-  const char* eval;
-};
-static Pos pos;
-static int dice[4], ndice = 0;
-static int sel = -1;
-static int preset = 1;
+// ---- game state (board always from the human's side: + = you) ----
+enum Phase { ROLL, MOVE, PASS, OVER };
+static BgBoard g, turnStart, cpuBefore;
+static Phase phase;
+static int dice[2];             // shown dice
+static bool cpuDice;            // shown dice are the CPU's
+static int rem[4], nrem;        // your dice still to play
+static BgSub subs[64];
+static int nsubs, sel = -1;     // sel: 1..24, 25 = bar
+static bool cpuMarks;           // show the CPU's last move
+static int scoreYou, scoreCpu;
+static char msg[48], evalTxt[32];
+static uint16_t evalCol;
+static BgBoard kids[1024];
 
-static void loadPreset(int i) {
-  memset(&pos, 0, sizeof pos);
-  pos.cube = 64;
-  ndice = 0;
-  sel = -1;
-  auto set = [](int p, int n) { pos.pts[p] = n; };
-  if (i == 0) {
-    set(24, 2); set(13, 5); set(8, 3); set(6, 5);
-    set(1, -2); set(12, -5); set(17, -3); set(19, -5);
-    pos.eval = "Your roll";
-  } else if (i == 1) {
-    set(6, 7); set(8, 2); set(13, 2); set(5, 2); set(4, 1); set(21, 1);
-    set(1, -2); set(12, -3); set(17, -2); set(18, -2); set(19, -3); set(20, -2);
-    pos.bar[1] = 1; pos.cube = 2; pos.cubeOwner = 1;
-    dice[0] = 6; dice[1] = 3; ndice = 2;
-    pos.eval = "Win 61.4%  +0.27";
-  } else {
-    set(1, 3); set(2, 3); set(3, 2); set(4, 2); set(5, 1);
-    set(24, -3); set(23, -2); set(21, -2); set(19, -1);
-    pos.off[0] = 4; pos.off[1] = 7;
-    dice[0] = 5; dice[1] = 2; ndice = 2;
-    pos.eval = "Win 38.9%  -0.22";
-  }
-}
+static uint16_t C_FRAME, C_FELT, C_PTA, C_PTB, C_ME, C_MERIM, C_MEIN, C_OP, C_OPRIM, C_OPIN,
+    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU;
 
-static bool allHome() {
-  if (pos.bar[0]) return false;
-  for (int p = 7; p <= 24; p++) if (pos.pts[p] > 0) return false;
-  return true;
-}
-static int dest(int p, int d) {
-  int t = p - d;
-  if (t >= 1) return pos.pts[t] >= -1 ? t : -1;
-  if (!allHome()) return -1;
-  if (t == 0) return 0;
-  for (int q = p + 1; q <= 6; q++) if (pos.pts[q] > 0) return -1;
-  return 0;
-}
-static void useDie(int d) {
-  for (int i = 0; i < ndice; i++) if (dice[i] == d) {
-    for (int j = i; j < ndice - 1; j++) dice[j] = dice[j + 1];
-    ndice--;
-    return;
-  }
-}
-static void roll() {
-  int a = random(1, 7), b = random(1, 7);
-  ndice = 0;
-  dice[ndice++] = a; dice[ndice++] = b;
-  if (a == b) { dice[ndice++] = a; dice[ndice++] = a; }
-  sel = -1;
-  pos.eval = "0-ply: n/a";
-}
-// The turn is over when no remaining die can move any checker: clear the dice
-// so the next tap rolls. (Bar entry and must-use-both-dice come with the
-// movegen port; this is still a display/touch test.)
-static void endIfStuck() {
-  for (int i = 0; i < ndice; i++)
-    for (int p = 1; p <= 24; p++)
-      if (pos.pts[p] > 0 && dest(p, dice[i]) >= 0) return;
-  if (ndice) { ndice = 0; sel = -1; pos.eval = "Tap dice to roll"; }
-}
-
-static int pips(bool me) {
-  int s = 0;
-  for (int p = 1; p <= 24; p++) {
-    if (me && pos.pts[p] > 0) s += pos.pts[p] * p;
-    if (!me && pos.pts[p] < 0) s += -pos.pts[p] * (25 - p);
-  }
-  return s + pos.bar[me ? 0 : 1] * 25;
-}
+static int pips(const BgBoard& b, int side) { return bg_pip_count(b, side); }
 
 // ---- geometry (480x320) ----
 static const int PW = 32;                  // point width
-static const int LX = 6, RFX = 228;         // left / right field x
+static const int LX = 6, RFX = 228;        // left / right field x
 static const int BARX = 198, BARW = 30;
-static const int TRX = 424, TRW = 50;        // tray
+static const int TRX = 424, TRW = 50;      // tray
 static const int FT = 25, FB = 316;        // field top / bottom
 static const int PH = 128;                 // point (triangle) height
 static const int CR = 13, STEP = 27;       // checker radius, stack step
-static const int MIDY = 171;               // dice / centred cube row
+static const int MIDY = 171;               // dice row
 
 static int colX(int c) { return c < 6 ? LX + c * PW : RFX + (c - 6) * PW; }
 static void pointGeom(int p, int& c, bool& top) {
   if (p >= 13) { c = p - 13; top = true; } else { c = 12 - p; top = false; }
 }
 static int stackY(bool top, int i) { return top ? FT + 14 + i * STEP : FB - 14 - i * STEP; }
+static int pointCX(int p) { int c; bool t; pointGeom(p, c, t); return colX(c) + PW / 2; }
 
-static uint16_t C_FRAME, C_FELT, C_PTA, C_PTB, C_ME, C_MERIM, C_MEIN, C_OP, C_OPRIM, C_OPIN,
-    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS;
-
-// ---- drawing (all y coordinates are screen space; shifted by the band offset) ----
+// ---- drawing (screen coordinates; shifted by the band offset) ----
 static void checker(int cx, int cy, bool mine, int r = CR) {
   cy -= oy;
+  if (cy < -r || cy > BAND + r) return;
   cv.fillSmoothCircle(cx, cy, r, mine ? C_MERIM : C_OPRIM);
   cv.fillSmoothCircle(cx, cy, r - 1, mine ? C_ME : C_OP);
   cv.drawCircle(cx, cy, r - 5, mine ? C_MEIN : C_OPIN);
 }
 static void rect(int x, int y, int w, int h, uint16_t c) { cv.fillRect(x, y - oy, w, h, c); }
+static void dot(int x, int y, int r, uint16_t c) { cv.fillSmoothCircle(x, y - oy, r, c); }
 static void tri(int x0, bool top, uint16_t col) {
   if (top) cv.fillTriangle(x0, FT - oy, x0 + PW - 1, FT - oy, x0 + PW / 2, FT + PH - oy, col);
   else     cv.fillTriangle(x0, FB - 1 - oy, x0 + PW - 1, FB - 1 - oy, x0 + PW / 2, FB - PH - oy, col);
 }
-static void die(int x, int y, int v) {
+static void die(int x, int y, int v, bool cpu, bool used) {
   y -= oy;
-  cv.fillRoundRect(x, y, 22, 22, 4, 0xF79D);
+  uint16_t body = cpu ? C_OP : 0xF79D, pip = cpu ? C_ME : TFT_BLACK;
+  if (used) { body = C_DIM; pip = 0x4208; }
+  cv.fillRoundRect(x, y, 22, 22, 4, body);
+  if (cpu) cv.drawRoundRect(x, y, 22, 22, 4, C_OPRIM);
   static const uint8_t P[7][6][2] = {{}, {{11,11}}, {{6,6},{16,16}}, {{6,6},{11,11},{16,16}},
     {{6,6},{16,6},{6,16},{16,16}}, {{6,6},{16,6},{11,11},{6,16},{16,16}},
     {{6,6},{16,6},{6,11},{16,11},{6,16},{16,16}}};
-  for (int i = 0; i < v; i++) cv.fillSmoothCircle(x + P[v][i][0], y + P[v][i][1], 2, TFT_BLACK);
+  for (int i = 0; i < v; i++) cv.fillSmoothCircle(x + P[v][i][0], y + P[v][i][1], 2, pip);
 }
 static void text(const char* s, int x, int y) { cv.drawString(s, x, y - oy); }
 static void number(int n, int x, int y) { cv.drawNumber(n, x, y - oy); }
+
+static bool canMoveFrom(int p) {
+  for (int i = 0; i < nsubs; i++) if (subs[i].from == p) return true;
+  return false;
+}
 
 static void drawBand() {
   rect(0, 0, W, 22, C_STATUS);
@@ -208,65 +160,89 @@ static void drawBand() {
     tri(colX(c), true, c % 2 ? C_PTB : C_PTA);
     tri(colX(c), false, c % 2 ? C_PTA : C_PTB);
   }
-  if (sel > 0) {
+  // Movable checkers: a yellow bar at the point's base (or the bar).
+  if (phase == MOVE && sel < 0) {
+    for (int p = 1; p <= 24; p++) if (canMoveFrom(p)) {
+      int c; bool top; pointGeom(p, c, top);
+      rect(colX(c) + 4, top ? FT : FB - 4, PW - 8, 4, C_SEL);
+    }
+  }
+  if (sel > 0 && sel <= 24) {
     int c; bool top; pointGeom(sel, c, top);
     cv.drawRect(colX(c), (top ? FT : FB - 5 * STEP - 1) - oy, PW, 5 * STEP + 1, C_SEL);
   }
+  // checkers
   cv.setFont(&fonts::FreeSansBold12pt7b);
   cv.setTextDatum(middle_center);
   for (int p = 1; p <= 24; p++) {
-    int n = pos.pts[p]; if (!n) continue;
+    int n = g.pts[p]; if (!n) continue;
     bool mine = n > 0; int a = abs(n), c; bool top; pointGeom(p, c, top);
     int cx = colX(c) + PW / 2;
     for (int i = 0; i < min(a, 5); i++) checker(cx, stackY(top, i), mine);
     if (a > 5) { cv.setTextColor(mine ? TFT_BLACK : C_ME); number(a, cx, stackY(top, 4) + 1); }
   }
   int bx = BARX + BARW / 2;
-  for (int i = 0; i < pos.bar[1]; i++) checker(bx, MIDY - 50 - i * STEP, false);
-  for (int i = 0; i < pos.bar[0]; i++) checker(bx, MIDY + 50 + i * STEP, true);
-  // cube
-  int cy = pos.cubeOwner == 1 ? FB - 30 : pos.cubeOwner == -1 ? FT + 6 : MIDY - 12;
-  rect(BARX + 3, cy, 24, 24, 0xEF3A);
-  cv.setFont(&fonts::FreeSansBold9pt7b);
-  cv.setTextColor(TFT_BLACK);
-  number(pos.cube, bx, cy + 12);
-  // borne off
-  for (int i = 0; i < pos.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
-  for (int i = 0; i < pos.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
-  // dice
-  if (ndice >= 2) { die(TRX + 2, MIDY - 11, dice[0]); die(TRX + 26, MIDY - 11, dice[1]); }
-  else if (ndice == 1) die(TRX + 14, MIDY - 11, dice[0]);
-  else { cv.setTextColor(C_TEXT); cv.setFont(&fonts::FreeSansBold9pt7b); text("ROLL", TRX + TRW / 2, MIDY); }
-  if (ndice > 2) {
-    cv.setFont(&fonts::FreeSans9pt7b); cv.setTextColor(C_TEXT);
-    char b[4]; snprintf(b, sizeof b, "x%d", ndice);
-    text(b, TRX + TRW / 2, MIDY + 22);
-  }
-  // targets
-  if (sel > 0) {
-    int seen = 0;
-    for (int i = 0; i < ndice; i++) {
-      int d = dice[i]; if (seen & (1 << d)) continue; seen |= 1 << d;
-      int t = dest(sel, d);
-      if (t > 0) {
-        int c; bool top; pointGeom(t, c, top);
-        int n = pos.pts[t] > 0 ? min((int)pos.pts[t], 4) : 0;
-        cv.fillSmoothCircle(colX(c) + PW / 2, stackY(top, n) - oy, 6, C_SEL);
-      } else if (t == 0) cv.fillSmoothCircle(TRX + TRW / 2, FB - 8 - pos.off[0] * 8 - 10 - oy, 6, C_SEL);
+  for (int i = 0; i < g.bar[1]; i++) checker(bx, MIDY - 40 - i * STEP, false);
+  for (int i = 0; i < g.bar[0]; i++) checker(bx, MIDY + 40 + i * STEP, true);
+  if (sel == 25) cv.drawRect(BARX, MIDY + 26 - oy, BARW, g.bar[0] * STEP + 2, C_SEL);
+  else if (phase == MOVE && sel < 0 && canMoveFrom(25)) rect(BARX + 4, MIDY + 22, BARW - 8, 4, C_SEL);
+  // The CPU's last move: orange marks where its checkers left and landed.
+  if (cpuMarks) {
+    for (int p = 1; p <= 24; p++) {
+      int was = cpuBefore.pts[p] < 0 ? -cpuBefore.pts[p] : 0, now = g.pts[p] < 0 ? -g.pts[p] : 0;
+      if (was == now) continue;
+      int c; bool top; pointGeom(p, c, top);
+      int y = top ? FT + 5 * STEP + 6 : FB - 5 * STEP - 6;
+      if (now > was) dot(colX(c) + PW / 2, y, 4, C_CPU);
+      else cv.drawCircle(colX(c) + PW / 2, y - oy, 4, C_CPU);
     }
   }
-  // status bar
+  // borne off
+  for (int i = 0; i < g.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
+  for (int i = 0; i < g.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
+  // dice
+  if (dice[0]) {
+    bool dbl = dice[0] == dice[1];
+    bool used0 = false, used1 = false;
+    if (phase == MOVE && !cpuDice && !dbl) {
+      used0 = true; used1 = true;
+      for (int i = 0; i < nrem; i++) { if (rem[i] == dice[0]) used0 = false; if (rem[i] == dice[1]) used1 = false; }
+    }
+    die(TRX + 2, MIDY - 11, dice[0], cpuDice, used0);
+    die(TRX + 26, MIDY - 11, dice[1], cpuDice, used1);
+    if (dbl && phase == MOVE && !cpuDice) {
+      cv.setFont(&fonts::FreeSans9pt7b); cv.setTextColor(C_TEXT); cv.setTextDatum(middle_center);
+      char b[4]; snprintf(b, sizeof b, "x%d", nrem);
+      text(b, TRX + TRW / 2, MIDY + 22);
+    }
+  }
+  if (phase == ROLL) {
+    cv.setFont(&fonts::FreeSansBold9pt7b); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
+    text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + 24 : MIDY);
+  }
+  // targets for the selected checker
+  if (sel > 0) {
+    for (int i = 0; i < nsubs; i++) {
+      if (subs[i].from != sel) continue;
+      int t = subs[i].to;
+      if (t > 0) {
+        int c; bool top; pointGeom(t, c, top);
+        int n = g.pts[t] > 0 ? min((int)g.pts[t], 4) : 0;
+        dot(colX(c) + PW / 2, stackY(top, n), 6, C_SEL);
+      } else dot(TRX + TRW / 2, FB - 8 - g.off[0] * 8 - 10, 6, C_SEL);
+    }
+  }
+  // status bar: pips | message | eval
   cv.setFont(&fonts::FreeSans9pt7b);
   cv.setTextDatum(middle_left);
   checker(12, 11, true, 7);
-  cv.setTextColor(C_TEXT); number(pips(true), 24, 11);
-  checker(80, 11, false, 7);
-  number(pips(false), 92, 11);
+  cv.setTextColor(C_TEXT); number(pips(g, 0), 24, 11);
+  checker(72, 11, false, 7);
+  number(pips(g, 1), 84, 11);
   cv.setTextDatum(middle_center);
-  cv.setTextColor(C_DIM); text("0-ply", W / 2, 11);
+  cv.setTextColor(C_TEXT); text(msg, 236, 11);
   cv.setTextDatum(middle_right);
-  cv.setTextColor(!strncmp(pos.eval, "Win 6", 5) ? C_GOOD : !strncmp(pos.eval, "Win 3", 5) ? C_BAD : C_TEXT);
-  text(pos.eval, W - 6, 11);
+  cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
 }
 
 static void draw() {
@@ -276,17 +252,90 @@ static void draw() {
   }
 }
 
-static void dumpFrame() {
-  Serial.print("FRAME\n");
-  static uint16_t line[W];
-  for (oy = 0; oy < H; oy += BAND) {
-    drawBand();
-    for (int y = 0; y < BAND; y++) {
-      for (int x = 0; x < W; x++) line[x] = cv.readPixel(x, y);
-      Serial.write((uint8_t*)line, sizeof line);
-    }
+// ---- game flow ----
+static void setEval() {
+  // Your chances with you on roll, from the net.
+  float p[6];
+  net.eval(g, p);
+  float win = p[0] + p[1] + p[2], eq = bg_equity(p);
+  snprintf(evalTxt, sizeof evalTxt, "%.1f%%  %+.2f", win * 100, eq);
+  evalCol = eq > 0.1f ? C_GOOD : eq < -0.1f ? C_BAD : C_TEXT;
+}
+
+static void gameOver(int pts, bool youWon) {
+  (youWon ? scoreYou : scoreCpu) += pts;
+  const char* kind = pts == 3 ? "backgammon" : pts == 2 ? "gammon" : "single";
+  snprintf(msg, sizeof msg, "%s %d (%s)", youWon ? "You win" : "CPU wins", pts, kind);
+  snprintf(evalTxt, sizeof evalTxt, "You %d - CPU %d", scoreYou, scoreCpu);
+  evalCol = C_TEXT;
+  phase = OVER;
+  sel = -1; nsubs = 0;
+}
+
+static void cpuTurn(int d1, int d2) {
+  dice[0] = d1; dice[1] = d2; cpuDice = true;
+  snprintf(msg, sizeof msg, "CPU rolls %d-%d...", d1, d2);
+  nsubs = 0; sel = -1; cpuMarks = false;
+  draw();
+  uint32_t t0 = millis();
+  BgBoard me = bg_swap(g);
+  int n = bg_genmoves(me, d1, d2, kids, 1024);
+  int best = bg_best(net, kids, n);
+  cpuBefore = g;
+  g = bg_swap(kids[best]);
+  cpuMarks = true;
+  uint32_t ms = millis() - t0;
+  Serial.printf("cpu %d-%d: %d moves, %u ms\n", d1, d2, n, ms);
+  if (int r = bg_result(kids[best])) { gameOver(r, false); return; }
+  snprintf(msg, sizeof msg, n == 1 && !memcmp(&kids[0], &me, sizeof me) ? "CPU can't move" : "CPU played %d-%d", d1, d2);
+  phase = ROLL;
+  setEval();
+}
+
+static void startMove(int d1, int d2) {
+  dice[0] = d1; dice[1] = d2; cpuDice = false;
+  nrem = 0;
+  rem[nrem++] = d1; rem[nrem++] = d2;
+  if (d1 == d2) { rem[nrem++] = d1; rem[nrem++] = d1; }
+  turnStart = g;
+  sel = -1;
+  nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
+  if (!nsubs) { phase = PASS; snprintf(msg, sizeof msg, "No legal move - tap to pass"); }
+  else { phase = MOVE; snprintf(msg, sizeof msg, "Your move: %d-%d", d1, d2); }
+}
+
+static void newGame() {
+  g = bg_start();
+  cpuMarks = false;
+  int a, b;
+  do { a = random(1, 7); b = random(1, 7); } while (a == b);
+  dice[0] = dice[1] = 0;
+  if (a > b) {
+    snprintf(msg, sizeof msg, "You %d, CPU %d: you start", a, b);
+    setEval();
+    startMove(a, b);
+    snprintf(msg, sizeof msg, "You start: play %d-%d", a, b);
+  } else {
+    setEval();
+    cpuTurn(b, a);
   }
-  Serial.flush();
+}
+
+static void endHumanTurn() {
+  nsubs = 0; sel = -1;
+  draw();
+  delay(250);
+  cpuTurn(random(1, 7), random(1, 7));
+}
+
+static void applySub(const BgSub& s) {
+  g = s.result;
+  for (int i = 0; i < nrem; i++) if (rem[i] == s.die) { rem[i] = rem[--nrem]; break; }
+  if (int r = bg_result(g)) { gameOver(r, true); return; }
+  sel = -1;
+  nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
+  if (!nsubs) endHumanTurn();
+  else if (nrem) snprintf(msg, sizeof msg, "Tap the bar above to undo");
 }
 
 // ---- touch ----
@@ -304,52 +353,117 @@ static void calibrate() {
   Serial.println("calibrated");
 }
 
-static int hitPoint(int x, int y) {
+// Board location under a tap: 1..24 point, 25 bar, 0 tray (bear off), -1 none.
+static int hitSpot(int x, int y) {
   if (y < FT || y >= FB) return -1;
+  if (x >= BARX && x < BARX + BARW) return 25;
+  if (x >= TRX) return 0;
   int c = -1;
   if (x >= LX && x < LX + 6 * PW) c = (x - LX) / PW;
   else if (x >= RFX && x < RFX + 6 * PW) c = 6 + (x - RFX) / PW;
   if (c < 0) return -1;
   return y < MIDY ? 13 + c : 12 - c;
 }
+
 static void tap(int x, int y) {
-  if (y < 22) { preset = (preset + 1) % 3; loadPreset(preset); draw(); return; }
-  if (x >= TRX && y >= MIDY - 20 && y <= MIDY + 20) {
-    if (!ndice) { roll(); endIfStuck(); draw(); }  // dice only roll once the turn is over
+  if (phase == OVER) { newGame(); draw(); return; }
+  if (phase == PASS) { endHumanTurn(); draw(); return; }
+  if (phase == ROLL) {
+    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) {
+      cpuMarks = false;
+      startMove(random(1, 7), random(1, 7));
+      if (phase == MOVE) snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
+      draw();
+    }
     return;
   }
+  // MOVE
+  if (y < 22) {  // undo the turn so far
+    if (memcmp(&g, &turnStart, sizeof g)) { startMove(dice[0], dice[1]); draw(); }
+    return;
+  }
+  int s = hitSpot(x, y);
+  if (s < 0) { sel = -1; draw(); return; }
   if (sel > 0) {
-    int tp = (x >= TRX && y > MIDY + 20) ? 0 : hitPoint(x, y);
-    int seen = 0;
-    for (int i = 0; i < ndice; i++) {
-      int d = dice[i]; if (seen & (1 << d)) continue; seen |= 1 << d;
-      if (tp >= 0 && dest(sel, d) == tp) {
-        pos.pts[sel]--;
-        if (tp == 0) pos.off[0]++;
-        else {
-          if (pos.pts[tp] == -1) { pos.pts[tp] = 0; pos.bar[1]++; }
-          pos.pts[tp]++;
-        }
-        useDie(d);
-        sel = (pos.pts[sel] > 0 && ndice) ? sel : -1;
-        endIfStuck();
-        draw();
-        return;
-      }
+    for (int i = 0; i < nsubs; i++)
+      if (subs[i].from == sel && subs[i].to == s) { applySub(subs[i]); draw(); return; }
+  }
+  sel = (s > 0 && s != sel && canMoveFrom(s)) ? s : -1;
+  // A single possible destination: move straight away.
+  if (sel > 0) {
+    int only = -1, cnt = 0;
+    for (int i = 0; i < nsubs; i++) if (subs[i].from == sel) { only = i; cnt++; }
+    if (cnt == 1) { applySub(subs[only]); }
+  }
+  draw();
+}
+
+// ---- verification against bgcore (serial 'v') ----
+static uint32_t fmix(uint32_t h) {
+  h ^= h >> 16; h *= 0x85EBCA6B; h ^= h >> 13; h *= 0xC2B2AE35; return h ^ (h >> 16);
+}
+
+static void verify() {
+  uint32_t n;
+  memcpy(&n, movetests_bin, 4);
+  int badCount = 0, badSet = 0, badBest = 0, ties = 0;
+  uint32_t genUs = 0, genMax = 0, bestUs = 0, bestMax = 0, evals = 0;
+  for (uint32_t t = 0; t < n; t++) {
+    const uint8_t* r = movetests_bin + 4 + t * 44;
+    BgBoard b; memset(&b, 0, sizeof b);
+    for (int p = 0; p < 24; p++) b.pts[p + 1] = (int8_t)r[p];
+    b.bar[0] = r[24]; b.bar[1] = r[25]; b.off[0] = r[26]; b.off[1] = r[27];
+    int d1 = r[28], d2 = r[29];
+    uint16_t cnt; uint32_t setH, bestH; float bestS;
+    memcpy(&cnt, r + 30, 2); memcpy(&setH, r + 32, 4); memcpy(&bestH, r + 36, 4); memcpy(&bestS, r + 40, 4);
+    uint32_t t0 = micros();
+    int k = bg_genmoves(b, d1, d2, kids, 1024);
+    uint32_t t1 = micros();
+    float s;
+    int best = bg_best(net, kids, k, &s);
+    uint32_t t2 = micros();
+    genUs += t1 - t0; genMax = max(genMax, t1 - t0);
+    bestUs += t2 - t1; bestMax = max(bestMax, t2 - t1); evals += k;
+    uint32_t h = 0;
+    for (int i = 0; i < k; i++) h += fmix(bg_hash(kids[i]));
+    if (k != cnt) badCount++;
+    if (h != setH) badSet++;
+    if (bg_hash(kids[best]) != bestH) {
+      if (fabsf(s - bestS) < 1e-4f) ties++;
+      else { badBest++; Serial.printf("  test %u: best differs, dev %.5f pc %.5f\n", t, s, bestS); }
     }
   }
-  int p = hitPoint(x, y);
-  sel = (p > 0 && pos.pts[p] > 0 && ndice && p != sel) ? p : -1;
-  draw();
+  Serial.printf("verify %u tests: count miss %d, set miss %d, choice miss %d (ties %d)\n",
+                n, badCount, badSet, badBest, ties);
+  Serial.printf("movegen avg %.2f ms max %.1f ms; 0-ply choice avg %.1f ms max %.0f ms; %.0f us/eval\n",
+                genUs / 1000.0 / n, genMax / 1000.0, bestUs / 1000.0 / n, bestMax / 1000.0,
+                double(bestUs) / evals);
+  Serial.println("DONE");
+}
+
+static void dumpFrame() {
+  Serial.print("FRAME\n");
+  static uint16_t line[W];
+  for (oy = 0; oy < H; oy += BAND) {
+    drawBand();
+    for (int y = 0; y < BAND; y++) {
+      for (int x = 0; x < W; x++) line[x] = cv.readPixel(x, y);
+      Serial.write((uint8_t*)line, sizeof line);
+    }
+  }
+  Serial.flush();
 }
 
 void setup() {
   Serial.begin(921600);
+  netOk = net.load(net_bin, NET_FLASH_SRAM);  // grab the 64 KB halves first
   lcd.init();
   lcd.setRotation(1);
   lcd.setBrightness(200);
   cv.setColorDepth(16);
   if (!cv.createSprite(W, BAND)) Serial.println("sprite alloc failed");
+  Serial.printf("net %s, free heap %u, largest %u\n", netOk ? "ok" : "LOAD FAILED",
+                ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   auto c = [](uint8_t r, uint8_t g, uint8_t b) { return lcd.color565(r, g, b); };
   C_FRAME = c(0x5b, 0x3a, 0x1f); C_FELT = c(0x1e, 0x5a, 0x38);
   C_PTA = c(0xdc, 0xc9, 0xa0);  C_PTB = c(0xa3, 0x39, 0x2b);
@@ -358,12 +472,18 @@ void setup() {
   C_BAR = c(0x4a, 0x2f, 0x18);  C_TRAY = c(0x17, 0x3f, 0x28);  C_SEL = c(0xff, 0xd2, 0x3c);
   C_TEXT = c(0xe8, 0xe2, 0xd2); C_DIM = c(0x8a, 0x8a, 0x8a);
   C_GOOD = c(0x7f, 0xe0, 0x8a); C_BAD = c(0xff, 0x8a, 0x7a); C_STATUS = c(0x10, 0x10, 0x10);
+  C_CPU = c(0xff, 0x9a, 0x3c);
   randomSeed(esp_random());
   prefs.begin("bg", false);
   uint16_t cal[8];
   if (prefs.getBytes("cal", cal, sizeof cal) == sizeof cal) lcd.setTouchCalibrate(cal);
   else calibrate();
-  loadPreset(preset);
+  if (!netOk) {
+    lcd.fillScreen(TFT_RED);
+    lcd.drawString("Net failed to load", W / 2, H / 2);
+    return;
+  }
+  newGame();
   draw();
 }
 
@@ -371,15 +491,15 @@ void loop() {
   int32_t x, y;
   static bool down = false;
   bool now = lcd.getTouch(&x, &y);
-  if (now && !down) tap(x, y);
+  if (now && !down && netOk) tap(x, y);
   down = now;
   if (Serial.available()) {
     int ch = Serial.read();
-    if (ch == 'n') { preset = (preset + 1) % 3; loadPreset(preset); draw(); }
-    else if (ch == 'r') { roll(); draw(); }
+    if (ch == 'v') verify();
+    else if (ch == 'n') { newGame(); draw(); }
     else if (ch == 'd') dumpFrame();
     else if (ch == 'k') { calibrate(); draw(); }
-    else if (ch == 't') { int tx = Serial.parseInt(), ty = Serial.parseInt(); tap(tx, ty); Serial.printf("tap %d %d sel=%d\n", tx, ty, sel); }
+    else if (ch == 't') { int tx = Serial.parseInt(), ty = Serial.parseInt(); tap(tx, ty); Serial.printf("tap %d %d phase=%d sel=%d\n", tx, ty, phase, sel); }
   }
   delay(10);
 }
