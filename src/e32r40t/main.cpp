@@ -88,6 +88,11 @@ static Phase phase;
 static int dice[2];             // shown dice
 static bool cpuDice;            // shown dice are the CPU's
 static int rem[4], nrem;        // your dice still to play
+// Each checker move this turn (one tap = one step, even if it used two dice),
+// so Undo step can go back one at a time.
+struct Step { BgBoard b; int rem[4], nrem; };
+static Step steps[8];
+static int nsteps;
 static BgSub subs[64];
 static int nsubs, sel = -1;     // sel: 1..24, 25 = bar
 static bool cpuMarks;           // show the CPU's last move
@@ -95,6 +100,7 @@ static bool hintMarks;          // show the engine's suggested move
 static BgBoard hintBefore, hintAfter;
 static bool menuOpen;
 static bool flying, flyMine, tumbling;  // animation: a checker in flight / dice rolling
+static bool blinkOn = true;             // ROLL / waiting prompts wink on and off
 static int flyX, flyY;
 // Start of one of your turns, for take-back (cube state included).
 struct Snap { BgBoard b; int8_t d1, d2; int16_t cubeVal; int8_t cubeOwn; };
@@ -234,13 +240,15 @@ static void drawMarks(const BgBoard& a, const BgBoard& b, bool mine, uint16_t co
 
 // ---- menu (2 x 3 buttons over the board) ----
 static const int MX = 90, MY = 44, MW = 300, MH = 238, BW = 136, BH = 52;
-static const char* const MENU[6] = {"Resume", "New game", "Take back", "Hint", "Reset score", "Calibrate touch"};
+// Tapping outside the panel (or the menu icon) closes it.
+static const char* const MENU[6] = {"Undo step", "New game", "Undo move", "Hint", "Reset score", "Calibrate touch"};
 static bool canTakeBack() {
   if (phase == MOVE) return memcmp(&g, &turnStart, sizeof g) || nhist >= 2;
   if (phase == PASS) return nhist >= 2;
   return phase == ROLL && nhist >= 1;
 }
 static bool menuEnabled(int i) {
+  if (i == 0) return phase == MOVE && nsteps > 0;
   if (i == 2) return canTakeBack();
   if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
   return true;
@@ -370,7 +378,7 @@ static void drawBand() {
       text(b, TRX + TRW / 2, MIDY + 22);
     }
   }
-  if (phase == ROLL && !tumbling) {
+  if (phase == ROLL && !tumbling && blinkOn) {
     cv.setFont(&fonts::FreeSansBold9pt7b); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
     text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + 24 : MIDY);
   }
@@ -393,7 +401,9 @@ static void drawBand() {
   checker(100, 11, false, 7);
   number(pips(g, 1), 112, 11);
   cv.setTextDatum(middle_center);
-  cv.setTextColor(C_TEXT); text(msg, 262, 11);
+  // Waiting for a tap to pass / start a new game: the message pulses.
+  cv.setTextColor((phase == PASS || phase == OVER) && !blinkOn ? C_DIM : C_TEXT);
+  text(msg, 262, 11);
   cv.setTextDatum(middle_right);
   cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
   if (phase == OFFER && !menuOpen) drawOffer();
@@ -579,6 +589,7 @@ static void startMove(int d1, int d2, bool push = true) {
   rem[nrem++] = d1; rem[nrem++] = d2;
   if (d1 == d2) { rem[nrem++] = d1; rem[nrem++] = d1; }
   turnStart = g;
+  nsteps = 0;
   sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
   if (!nsubs) { phase = PASS; snprintf(msg, sizeof msg, "No legal move - tap to pass"); }
@@ -644,6 +655,7 @@ static void humanDouble() {
 static bool canDouble() { return phase == ROLL && cubeOwn >= 0 && cubeVal < 64; }
 
 static void applyPath(const Path& p) {
+  if (nsteps < 8) { steps[nsteps].b = g; memcpy(steps[nsteps].rem, rem, sizeof rem); steps[nsteps++].nrem = nrem; }
   sel = -1; npaths = 0;  // no selection / target markers while it moves
   for (int k = 0; k < p.n; k++) {
     animateStep(g, p.step[k].result, p.step[k].from, p.step[k].to, true);
@@ -658,6 +670,16 @@ static void applyPath(const Path& p) {
 }
 
 // ---- menu actions ----
+// Undo the last checker you moved this turn and give its dice back.
+static void undoStep() {
+  const Step& s = steps[--nsteps];
+  g = s.b;
+  memcpy(rem, s.rem, sizeof rem); nrem = s.nrem;
+  sel = -1; npaths = 0; hintMarks = false;
+  nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
+  snprintf(msg, sizeof msg, "Step undone: %d to play", nrem);
+}
+
 static void takeBack() {
   cpuMarks = hintMarks = false;
   if (phase == MOVE && memcmp(&g, &turnStart, sizeof g)) {
@@ -700,6 +722,7 @@ static void menuTap(int x, int y) {
   if (!menuEnabled(hit)) return;
   menuOpen = false;
   switch (hit) {
+    case 0: undoStep(); break;
     case 1: newGame(); break;
     case 2: takeBack(); break;
     case 3: hint(); break;
@@ -922,6 +945,14 @@ void setup() {
 }
 
 void loop() {
+  // Wink the prompt you're expected to act on (~2 Hz), redrawing only it.
+  static uint32_t lastBlink = 0;
+  if (netOk && !menuOpen && millis() - lastBlink > 450 && (phase == ROLL || phase == PASS || phase == OVER)) {
+    lastBlink = millis();
+    blinkOn = !blinkOn;
+    if (phase == ROLL) redrawRegion(TRX, MIDY - 12, W, MIDY + 40);
+    else redrawRegion(140, 0, 385, 22);
+  } else if (phase == MOVE || phase == OFFER) blinkOn = true;
   // Resistive touch: the first samples of a press are unreliable, so collect
   // the whole press and act on release at the median position.
   static int16_t sx[64], sy[64];
