@@ -197,6 +197,15 @@ static bool canMoveFrom(int p) {
   return false;
 }
 
+// Screen position of the target marker for destination t (0 = bear off).
+static void targetXY(int t, int& x, int& y) {
+  if (t > 0) {
+    int c; bool top; pointGeom(t, c, top);
+    int n = g.pts[t] > 0 ? min((int)g.pts[t], 4) : 0;
+    x = colX(c) + PW / 2; y = stackY(top, n);
+  } else { x = TRX + TRW / 2; y = FB - 8 - g.off[0] * 8 - 10; }
+}
+
 static void drawMarks(const BgBoard& a, const BgBoard& b, bool mine, uint16_t col) {
   auto cnt = [mine](const BgBoard& x, int p) { int v = mine ? x.pts[p] : -x.pts[p]; return v > 0 ? v : 0; };
   for (int p = 1; p <= 24; p++) {
@@ -324,12 +333,8 @@ static void drawBand() {
   // Filled dot: one die. Ring: several dice with the same checker.
   if (sel > 0) {
     for (int i = 0; i < npaths; i++) {
-      int t = paths[i].to, x, y;
-      if (t > 0) {
-        int c; bool top; pointGeom(t, c, top);
-        int n = g.pts[t] > 0 ? min((int)g.pts[t], 4) : 0;
-        x = colX(c) + PW / 2; y = stackY(top, n);
-      } else { x = TRX + TRW / 2; y = FB - 8 - g.off[0] * 8 - 10; }
+      int x, y;
+      targetXY(paths[i].to, x, y);
       if (paths[i].n == 1) dot(x, y, 6, C_SEL);
       else { dot(x, y, 7, C_SEL); dot(x, y, 4, C_FELT); }
     }
@@ -553,13 +558,38 @@ static void tap(int x, int y) {
   if (y < FT) return;  // status bar / frame: ignore
   hintMarks = false;
   int s = hitSpot(x, y);
-  Serial.printf("tap %d,%d -> spot %d (sel %d)\n", x, y, s, sel);
-  if (sel > 0) {
-    for (int i = 0; i < npaths; i++)
-      if (paths[i].to == s) { applyPath(paths[i]); draw(); return; }
+  // Forgiving hit tests (resistive touch is a few px off): the nearest target
+  // marker within reach, else the nearest movable checker column.
+  int tgt = -1, src = -1;
+  bool sIsTarget = false;
+  for (int i = 0; i < npaths; i++) sIsTarget |= paths[i].to == s;
+  bool switching = s > 0 && s != sel && canMoveFrom(s) && !sIsTarget;  // picking another checker
+  if (sel > 0 && !switching) {
+    int best = 28 * 28;
+    for (int i = 0; i < npaths; i++) {
+      int tx, ty; targetXY(paths[i].to, tx, ty);
+      int d = (tx - x) * (tx - x) + (ty - y) * (ty - y);
+      if (paths[i].to == s) d = 0;  // inside the destination's own column
+      if (d < best) { best = d; tgt = i; }
+    }
   }
-  if (s > 0 && s != sel && canMoveFrom(s)) {
-    sel = s;
+  if (tgt < 0 && y >= FT && y < FB) {
+    if (s > 0 && canMoveFrom(s)) src = s;
+    else {
+      int best = PW / 2 + 9;  // up to ~8 px into a neighbouring column
+      for (int p = 1; p <= 25; p++) {
+        if (!canMoveFrom(p)) continue;
+        int cx = p == 25 ? BARX + BARW / 2 : pointCX(p);
+        if (p != 25 && (p >= 13) != (y < MIDY)) continue;  // wrong half
+        if (abs(cx - x) < best) { best = abs(cx - x); src = p; }
+      }
+    }
+  }
+  Serial.printf("tap %d,%d -> spot %d, target %d, source %d (sel %d)\n", x, y, s,
+                tgt >= 0 ? paths[tgt].to : -1, src, sel);
+  if (tgt >= 0) { applyPath(paths[tgt]); draw(); return; }
+  if (src > 0 && src != sel) {
+    sel = src;
     computePaths();
     if (npaths == 1) { applyPath(paths[0]); draw(); return; }  // only one place to go
     snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
@@ -674,7 +704,13 @@ void loop() {
     int skip = ns > 4 ? 2 : 0, m = ns - skip;
     std::sort(sx + skip, sx + ns);
     std::sort(sy + skip, sy + ns);
-    if (netOk) tap(sx[skip + m / 2], sy[skip + m / 2]);
+    int tx = sx[skip + m / 2], ty = sy[skip + m / 2];
+    if (netOk) tap(tx, ty);
+    // Where the screen thinks you touched (gone at the next redraw).
+    if (!menuOpen) {
+      lcd.drawFastHLine(tx - 6, ty, 13, TFT_WHITE);
+      lcd.drawFastVLine(tx, ty - 6, 13, TFT_WHITE);
+    }
     ns = 0;
   }
   if (Serial.available()) {
