@@ -57,6 +57,15 @@ hand over, as with DONE.
 - The cube sits at the owner's end of the bar; wins are multiplied by it, a drop scores the
   current value.
 
+**Resigning**
+
+- Menu > Resign offers a single, gammon or backgammon. The CPU accepts if that's at least what
+  it expects from playing on (the net's equity with you on roll at the start of your turn) -
+  e.g. it refuses a single when it's likely to gammon you - and says what it expected.
+- A hopeless CPU (under 0.2% to win) resigns before its roll: a single, or a gammon /
+  backgammon if you have real chances of one. Accept to take the points, or Refuse to play on
+  (it won't offer again that game).
+
 **Menu** (the three lines, top left; tap outside the panel to close it)
 
 | Button | |
@@ -65,8 +74,10 @@ hand over, as with DONE.
 | New game | Start again (the score is kept) |
 | Undo move | Undo your whole turn so far; if you haven't moved (or the CPU has replied), go back to the start of your previous turn, undoing the CPU's move and any cube action |
 | Hint | Your turn: the best move in cyan (rings = from, dots = to). Before rolling: cube advice |
+| Resign | Offer a single, gammon or backgammon (times the cube), or cancel |
 | Reset score | Score back to 0-0 |
 | Calibrate touch | Re-run the 4-corner touch calibration |
+| Close | Close the menu |
 
 When a game ends the status message pulses with the result and score; tap to start the next
 game. Touch calibration also runs on first boot and is stored in NVS.
@@ -98,7 +109,8 @@ move-choice mismatches; 3.7 ms/eval, ~84 ms per average CPU move, ~1 s for the l
 (344 legal moves).
 
 Other serial commands: `n` new game, `t X Y` simulated tap, `d` dump the frame (see
-`tools/grab.py`), `k` recalibrate, `g` / `h` load cube-test race positions.
+`tools/grab.py`), `k` recalibrate. Test positions: `g` / `h` cube races, `p` closed out (pass),
+`q` about to be gammoned (resign), `r` CPU hopeless (it resigns).
 
 ## Net export
 

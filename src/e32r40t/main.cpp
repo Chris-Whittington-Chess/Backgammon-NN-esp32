@@ -100,7 +100,9 @@ static int clipX0 = 0, clipX1 = 480;  // columns being redrawn: skip shapes outs
 
 // ---- game state (board always from the human's side: + = you) ----
 // DONE: all your dice played, waiting for you to tap the dice to hand over.
-enum Phase { ROLL, MOVE, PASS, OVER, OFFER, DONE };  // OFFER: the CPU has doubled you
+// OFFER: the CPU has doubled you. RESIGN: you're choosing how much to resign.
+// RESOFFER: the CPU has offered to resign.
+enum Phase { ROLL, MOVE, PASS, OVER, OFFER, DONE, RESIGN, RESOFFER };
 static BgBoard g, turnStart, cpuBefore;
 static Phase phase;
 static int dice[2];             // shown dice
@@ -114,6 +116,9 @@ static int nsteps;
 static BgSub subs[64];
 static int nsubs, sel = -1;     // sel: 1..24, 25 = bar
 static bool cpuMarks;           // show the CPU's last move
+static int resumePhase;         // where a refused resignation returns to
+static int cpuResignLevel;      // what the CPU offered (1 single, 2 gammon, 3 backgammon)
+static bool cpuResignRefused;   // you refused it: the CPU won't offer again this game
 static bool hintMarks;          // show the engine's suggested move
 static BgBoard hintBefore, hintAfter;
 static bool menuOpen;
@@ -265,10 +270,12 @@ static void drawMarks(const BgBoard& a, const BgBoard& b, bool mine, uint16_t co
   if (b.bar[s] < a.bar[s]) { int y = mine ? MIDY + 40 : MIDY - 40; cv.drawCircle(BARX + BARW / 2, y - oy, 5, col); }
 }
 
-// ---- menu (2 x 3 buttons over the board) ----
-static const int MX = 90, MY = 44, MW = 300, MH = 238, BW = 136, BH = 52;
-// Tapping outside the panel (or the menu icon) closes it.
-static const char* const MENU[6] = {"Undo step", "New game", "Undo move", "Hint", "Reset score", "Calibrate touch"};
+// ---- menu (2 x 4 buttons over the board) ----
+static const int MX = 90, MY = 22, MW = 300, MH = 258, BW = 136, BH = 46;
+// Tapping outside the panel (or the menu icon) also closes it.
+static const int NMENU = 8;
+static const char* const MENU[NMENU] = {"Undo step", "New game", "Undo move", "Hint",
+                                        "Resign", "Reset score", "Calibrate touch", "Close"};
 static bool canTakeBack() {
   if (phase == DONE) return true;
   if (phase == MOVE) return memcmp(&g, &turnStart, sizeof g) || nhist >= 2;
@@ -279,30 +286,57 @@ static bool menuEnabled(int i) {
   if (i == 0) return (phase == MOVE || phase == DONE) && nsteps > 0;
   if (i == 2) return canTakeBack();
   if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
+  if (i == 4) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
   return true;
 }
 static int buttonX(int i) { return MX + 10 + (i % 2) * (BW + 8); }
 
-// The CPU's double: a panel with Take / Drop (buttons 0 and 1 of OFFER_Y's row).
-static const int OFFER_Y = 92, OFFER_H = 150, OFFER_BY = OFFER_Y + 86;
-static void drawOffer() {
-  if (OFFER_Y + OFFER_H < oy || OFFER_Y > oy + BAND) return;
-  cv.fillRoundRect(MX, OFFER_Y - oy, MW, OFFER_H, 10, C_STATUS);
-  cv.drawRoundRect(MX, OFFER_Y - oy, MW, OFFER_H, 10, C_DIM);
+// A question over the board (the CPU's double, choosing how much to resign,
+// the CPU's resignation): a title, a line of detail and 2 or 4 buttons.
+static char dlgTitle[40];
+static char dlgLbl[4][20];
+static int dlgN;
+static const int DLG_Y = 70;
+static int dlgBY(int i) { return DLG_Y + 74 + (i / 2) * (BH + 8); }
+static int dlgH() { return 74 + (dlgN / 2) * (BH + 8) + 6; }
+static bool dialogUp() { return phase == OFFER || phase == RESIGN || phase == RESOFFER; }
+static void setDialog(const char* title, const char* const* lbl, int n) {
+  snprintf(dlgTitle, sizeof dlgTitle, "%s", title);
+  for (int i = 0; i < n; i++) snprintf(dlgLbl[i], sizeof dlgLbl[i], "%s", lbl[i]);
+  dlgN = n;
+}
+static int dlgHit(int x, int y) {
+  for (int i = 0; i < dlgN; i++)
+    if (x >= buttonX(i) && x < buttonX(i) + BW && y >= dlgBY(i) && y < dlgBY(i) + BH) return i;
+  return -1;
+}
+static void drawDialog() {
+  if (DLG_Y + dlgH() < oy || DLG_Y > oy + BAND) return;
+  cv.fillRoundRect(MX, DLG_Y - oy, MW, dlgH(), 10, C_STATUS);
+  cv.drawRoundRect(MX, DLG_Y - oy, MW, dlgH(), 10, C_DIM);
   cv.setTextDatum(middle_center);
   cv.setFont(&F_B21);
   cv.setTextColor(C_TEXT);
-  text(msg, MX + MW / 2, OFFER_Y + 24);
+  text(dlgTitle, MX + MW / 2, DLG_Y + 22);
   cv.setFont(&F_S16);
   cv.setTextColor(C_DIM);
-  text(offerTxt, MX + MW / 2, OFFER_Y + 54);
-  cv.setFont(&F_S21);
-  const char* lbl[2] = {"Take", "Drop"};
-  for (int i = 0; i < 2; i++) {
-    cv.fillRoundRect(buttonX(i), OFFER_BY - oy, BW, BH, 8, C_FELT);
-    cv.drawRoundRect(buttonX(i), OFFER_BY - oy, BW, BH, 8, C_SEL);
+  text(offerTxt, MX + MW / 2, DLG_Y + 50);
+  for (int i = 0; i < dlgN; i++) {
+    cv.fillRoundRect(buttonX(i), dlgBY(i) - oy, BW, BH, 8, C_FELT);
+    cv.drawRoundRect(buttonX(i), dlgBY(i) - oy, BW, BH, 8, C_SEL);
     cv.setTextColor(C_TEXT);
-    text(lbl[i], buttonX(i) + BW / 2, OFFER_BY + BH / 2);
+    char* nl = strchr(dlgLbl[i], '\n');  // two-line label: name, then detail
+    if (nl) {
+      *nl = 0;
+      cv.setFont(&F_S16);
+      text(dlgLbl[i], buttonX(i) + BW / 2, dlgBY(i) + BH / 2 - 9);
+      cv.setTextColor(C_DIM);
+      text(nl + 1, buttonX(i) + BW / 2, dlgBY(i) + BH / 2 + 10);
+      *nl = '\n';
+    } else {
+      cv.setFont(strlen(dlgLbl[i]) > 9 ? &F_S16 : &F_S21);
+      text(dlgLbl[i], buttonX(i) + BW / 2, dlgBY(i) + BH / 2);
+    }
   }
 }
 
@@ -319,7 +353,7 @@ static void drawCube() {
   cv.setTextColor(TFT_BLACK);
   number(cubeVal == 1 ? 64 : cubeVal, x + CUBE_S / 2, y + CUBE_S / 2 + 1);
 }
-static int buttonY(int i) { return MY + 40 + (i / 2) * (BH + 10); }
+static int buttonY(int i) { return MY + 36 + (i / 2) * (BH + 8); }
 
 static void drawMenu() {
   if (MY + MH < oy || MY > oy + BAND) return;
@@ -328,14 +362,14 @@ static void drawMenu() {
   cv.setFont(&F_B21);
   cv.setTextDatum(middle_center);
   cv.setTextColor(C_TEXT);
-  text("Menu", MX + MW / 2, MY + 20);
+  text("Menu", MX + MW / 2, MY + 18);
   cv.setFont(&F_S21);
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < NMENU; i++) {
     bool on = menuEnabled(i);
     cv.fillRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_FELT : C_BAR);
     cv.drawRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_SEL : C_DIM);
     cv.setTextColor(on ? C_TEXT : C_DIM);
-    if (i == 5) {  // two lines
+    if (i == 6) {  // two lines
       cv.setFont(&F_S16);
       text("Calibrate", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - 9);
       text("touch", buttonX(i) + BW / 2, buttonY(i) + BH / 2 + 10);
@@ -447,7 +481,7 @@ static void drawBand() {
     cv.setTextDatum(middle_right);
     cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
   }
-  if (phase == OFFER && !menuOpen) drawOffer();
+  if (dialogUp() && !menuOpen) drawDialog();
   if (menuOpen) drawMenu();
 }
 
@@ -577,10 +611,10 @@ static void setEval() {
 }
 
 // pts: 1 single, 2 gammon, 3 backgammon - times the cube; 0 = a dropped double.
-static void gameOver(int pts, bool youWon) {
+static void gameOver(int pts, bool youWon, const char* how = nullptr) {
   int won = pts ? pts * cubeVal : cubeVal;
   (youWon ? scoreYou : scoreCpu) += won;
-  const char* kind = !pts ? "dropped" : pts == 3 ? "backgammon" : pts == 2 ? "gammon" : "single";
+  const char* kind = how ? how : !pts ? "dropped" : pts == 3 ? "backgammon" : pts == 2 ? "gammon" : "single";
   snprintf(msg, sizeof msg, "%s %d (%s)", youWon ? "You win" : "CPU wins", won, kind);
   snprintf(evalTxt, sizeof evalTxt, "You %d - CPU %d", scoreYou, scoreCpu);
   evalCol = C_TEXT;
@@ -643,6 +677,7 @@ static void newGame() {
   g = bg_start();
   cpuMarks = hintMarks = false;
   cubeVal = 1; cubeOwn = 0;
+  cpuResignRefused = false;
   nhist = 0;
   int a, b;
   do { a = random(1, 7); b = random(1, 7); } while (a == b);
@@ -669,6 +704,23 @@ static void endHumanTurn() {
   nsubs = 0; sel = -1;
   draw();
   delay(250);
+  // A hopeless CPU resigns rather than play on: the least you'd accept -
+  // a single unless you have real gammon (or backgammon) chances.
+  if (!cpuResignRefused) {
+    float q[6];
+    net.eval(bg_swap(g), q);  // CPU on roll
+    if (q[0] + q[1] + q[2] < 0.002f) {
+      cpuResignLevel = q[4] + q[5] < 0.01f ? 1 : q[5] < 0.01f ? 2 : 3;
+      const char* nm[4] = {"", "a single", "a gammon", "a backgammon"};
+      char t[40]; snprintf(t, sizeof t, "CPU resigns %s", nm[cpuResignLevel]);
+      snprintf(offerTxt, sizeof offerTxt, "You would win %d point%s", cpuResignLevel * cubeVal, cpuResignLevel * cubeVal > 1 ? "s" : "");
+      static const char* const AR[2] = {"Accept", "Refuse"};
+      setDialog(t, AR, 2);
+      snprintf(msg, sizeof msg, "CPU offers to resign");
+      phase = RESOFFER; cpuMarks = false;
+      return;
+    }
+  }
   // Before rolling, the CPU may double (cube centred or its own).
   if (cubeOwn <= 0 && cubeVal < 64) {
     BgCubeCall c = cubeCall(bg_swap(g), -cubeOwn);
@@ -676,6 +728,8 @@ static void endHumanTurn() {
     if (c.dbl) {
       phase = OFFER;
       snprintf(msg, sizeof msg, "CPU doubles to %d", cubeVal * 2);
+      static const char* const TD[2] = {"Take", "Drop"};
+      setDialog(msg, TD, 2);
       float q[6];
       net.eval(bg_swap(g), q);  // CPU on roll: your wins are its losses (cubeless)
       snprintf(offerTxt, sizeof offerTxt, "Your chances: %.0f%%", (q[3] + q[4] + q[5]) * 100);
@@ -757,9 +811,40 @@ static void hint() {
   snprintf(msg, sizeof msg, "Hint shown (%+.2f)", s);
 }
 
+// Menu > Resign: choose a single / gammon / backgammon (or cancel).
+static void openResign() {
+  resumePhase = phase;
+  sel = -1; npaths = 0; hintMarks = false;
+  char l[4][20];
+  const char* nm[3] = {"Single", "Gammon", "Backgammon"};
+  for (int k = 0; k < 3; k++) {
+    int pts = (k + 1) * cubeVal;
+    snprintf(l[k], sizeof l[k], "%s\n%d point%s", nm[k], pts, pts > 1 ? "s" : "");
+  }
+  snprintf(l[3], sizeof l[3], "Cancel");
+  const char* lp[4] = {l[0], l[1], l[2], l[3]};
+  setDialog("Resign how much?", lp, 4);
+  snprintf(offerTxt, sizeof offerTxt, "The CPU may refuse");
+  snprintf(msg, sizeof msg, "Resign?");
+  phase = RESIGN;
+}
+
+// The CPU accepts a resignation worth at least what it expects from playing
+// on: its cubeless equity (per cube) with you on roll at the start of your turn.
+static void resignOffer(int level) {
+  float p[6];
+  bool started = resumePhase == MOVE || resumePhase == DONE;
+  net.eval(started ? turnStart : g, p);
+  float cpuExp = -bg_equity(p);
+  Serial.printf("you resign %d: cpu expects %.3f -> %s\n", level, cpuExp, level >= cpuExp - 0.01f ? "accepts" : "refuses");
+  if (level >= cpuExp - 0.01f) { gameOver(level, false, "you resigned"); return; }
+  phase = (Phase)resumePhase;
+  snprintf(msg, sizeof msg, "CPU refuses (expects %.2f)", cpuExp);
+}
+
 static void menuTap(int x, int y) {
   int hit = -1;
-  for (int i = 0; i < 6; i++)
+  for (int i = 0; i < NMENU; i++)
     if (x >= buttonX(i) && x < buttonX(i) + BW && y >= buttonY(i) && y < buttonY(i) + BH) hit = i;
   bool inside = x >= MX && x < MX + MW && y >= MY && y < MY + MH;
   if (hit < 0) { if (!inside) { menuOpen = false; draw(); } return; }
@@ -770,8 +855,10 @@ static void menuTap(int x, int y) {
     case 1: newGame(); break;
     case 2: takeBack(); break;
     case 3: hint(); break;
-    case 4: scoreYou = scoreCpu = 0; snprintf(msg, sizeof msg, "Score reset"); break;
-    case 5: calibrate(); break;
+    case 4: openResign(); break;
+    case 5: scoreYou = scoreCpu = 0; snprintf(msg, sizeof msg, "Score reset"); break;
+    case 6: calibrate(); break;
+    case 7: break;  // Close
   }
   draw();
 }
@@ -827,16 +914,24 @@ static void tap(int x, int y) {
     return;
   }
   if (phase == OFFER) {
-    for (int i = 0; i < 2; i++) {
-      if (x < buttonX(i) || x >= buttonX(i) + BW || y < OFFER_BY || y >= OFFER_BY + BH) continue;
-      if (i == 1) gameOver(0, false);  // drop: the CPU wins the current cube
-      else {
-        cubeVal *= 2; cubeOwn = 1;
-        cpuTurn(random(1, 7), random(1, 7));
-      }
-      draw();
-      return;
-    }
+    int i = dlgHit(x, y);
+    if (i == 1) gameOver(0, false);  // drop: the CPU wins the current cube
+    else if (i == 0) { cubeVal *= 2; cubeOwn = 1; cpuTurn(random(1, 7), random(1, 7)); }
+    if (i >= 0) draw();
+    return;
+  }
+  if (phase == RESIGN) {
+    int i = dlgHit(x, y);
+    if (i == 3) { phase = (Phase)resumePhase; snprintf(msg, sizeof msg, "Play on"); }
+    else if (i >= 0) resignOffer(i + 1);
+    if (i >= 0) draw();
+    return;
+  }
+  if (phase == RESOFFER) {
+    int i = dlgHit(x, y);
+    if (i == 0) gameOver(cpuResignLevel, true, "CPU resigned");
+    else if (i == 1) { cpuResignRefused = true; cpuTurn(random(1, 7), random(1, 7)); }
+    if (i >= 0) draw();
     return;
   }
   if (phase == ROLL) {
@@ -1033,6 +1128,28 @@ void loop() {
     if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
+    else if (ch == 'q') {
+      // You're about to be gammoned (the CPU has 2 left, you have none off):
+      // resigning a single should be refused, a gammon accepted.
+      memset(&g, 0, sizeof g);
+      g.pts[24] = -2; g.off[1] = 13; g.pts[6] = 15;
+      cubeVal = 1; cubeOwn = 0; nhist = 0; dice[0] = dice[1] = 0;
+      cpuMarks = hintMarks = false;
+      setEval();
+      phase = ROLL; snprintf(msg, sizeof msg, "Test: about to be gammoned");
+      draw();
+    }
+    else if (ch == 'r') {
+      // CPU-resign test: you have 2 left on the ace point, the CPU hasn't borne
+      // any off, and your turn has just ended - the CPU should resign a gammon.
+      memset(&g, 0, sizeof g);
+      g.pts[1] = 2; g.off[0] = 13; g.pts[19] = -15;
+      cubeVal = 1; cubeOwn = 0; nhist = 0; dice[0] = dice[1] = 0;
+      cpuMarks = hintMarks = false; cpuResignRefused = false;
+      setEval();
+      endHumanTurn();
+      draw();
+    }
     else if (ch == 'p') {
       // Pass test: you on the bar against a closed board - every roll dances.
       memset(&g, 0, sizeof g);
