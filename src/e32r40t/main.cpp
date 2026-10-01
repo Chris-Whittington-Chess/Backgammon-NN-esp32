@@ -22,6 +22,22 @@
 extern const uint8_t net_bin[] asm("_binary_data_net_bin_start");
 extern const uint8_t movetests_bin[] asm("_binary_data_movetests_bin_start");
 
+// Anti-aliased DejaVu Sans (tools/make_fonts.py), read from flash.
+#define FONT(n) extern const uint8_t n##_s[] asm("_binary_data_fonts_" #n "_vlw_start"); \
+                extern const uint8_t n##_e[] asm("_binary_data_fonts_" #n "_vlw_end");
+FONT(sans16) FONT(bold16) FONT(sans21) FONT(bold21)
+static lgfx::VLWfont F_S16, F_B16, F_S21, F_B21;
+static lgfx::PointerWrapper fontData[4];
+static void loadFonts() {
+  const uint8_t* s[4] = {sans16_s, bold16_s, sans21_s, bold21_s};
+  const uint8_t* e[4] = {sans16_e, bold16_e, sans21_e, bold21_e};
+  lgfx::VLWfont* f[4] = {&F_S16, &F_B16, &F_S21, &F_B21};
+  for (int i = 0; i < 4; i++) {
+    fontData[i].set(s[i], e[i] - s[i]);
+    if (!f[i]->loadFont(&fontData[i])) Serial.printf("font %d failed\n", i);
+  }
+}
+
 class LGFX : public lgfx::LGFX_Device {
   lgfx::Panel_ST7796 panel;
   lgfx::Bus_SPI bus;
@@ -115,7 +131,7 @@ static uint16_t evalCol;
 static BgBoard kids[1024];
 
 static uint16_t C_FRAME, C_FELT, C_PTA, C_PTB, C_ME, C_MERIM, C_MEIN, C_OP, C_OPRIM, C_OPIN,
-    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU, C_HINT;
+    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU, C_HINT, C_OPHI;
 
 static void calibrate();
 
@@ -180,22 +196,30 @@ static int pointCX(int p) { int c; bool t; pointGeom(p, c, t); return colX(c) + 
 static void checker(int cx, int cy, bool mine, int r = CR) {
   cy -= oy;
   if (cy < -r || cy > BAND + r) return;
+  // Rim, face, a smooth inner ring, and a small highlight up-left.
   cv.fillSmoothCircle(cx, cy, r, mine ? C_MERIM : C_OPRIM);
   cv.fillSmoothCircle(cx, cy, r - 1, mine ? C_ME : C_OP);
-  cv.drawCircle(cx, cy, r - 5, mine ? C_MEIN : C_OPIN);
+  if (r >= 9) {
+    cv.fillSmoothCircle(cx, cy, r - 4, mine ? C_MEIN : C_OPIN);
+    cv.fillSmoothCircle(cx, cy, r - 5, mine ? C_ME : C_OP);
+    cv.fillSmoothCircle(cx - r / 3, cy - r / 3, 2, mine ? TFT_WHITE : C_OPHI);
+  }
 }
 static void rect(int x, int y, int w, int h, uint16_t c) { cv.fillRect(x, y - oy, w, h, c); }
 static void dot(int x, int y, int r, uint16_t c) { cv.fillSmoothCircle(x, y - oy, r, c); }
 static void tri(int x0, bool top, uint16_t col) {
-  if (top) cv.fillTriangle(x0, FT - oy, x0 + PW - 1, FT - oy, x0 + PW / 2, FT + PH - oy, col);
-  else     cv.fillTriangle(x0, FB - 1 - oy, x0 + PW - 1, FB - 1 - oy, x0 + PW / 2, FB - PH - oy, col);
+  // Filled, then the two long edges re-drawn anti-aliased so they don't stair-step.
+  int by = (top ? FT : FB - 1) - oy, ty = (top ? FT + PH : FB - PH) - oy, tx = x0 + PW / 2;
+  cv.fillTriangle(x0, by, x0 + PW - 1, by, tx, ty, col);
+  cv.drawSmoothLine(x0, by, tx, ty, col);
+  cv.drawSmoothLine(x0 + PW - 1, by, tx, ty, col);
 }
 static void die(int x, int y, int v, bool cpu, bool used) {
   y -= oy;
   uint16_t body = cpu ? C_OP : 0xF79D, pip = cpu ? C_ME : TFT_BLACK;
   if (used) { body = C_DIM; pip = 0x4208; }
-  cv.fillRoundRect(x, y, 22, 22, 4, body);
-  if (cpu) cv.drawRoundRect(x, y, 22, 22, 4, C_OPRIM);
+  if (cpu) { cv.fillSmoothRoundRect(x, y, 22, 22, 4, C_OPRIM); cv.fillSmoothRoundRect(x + 1, y + 1, 20, 20, 3, body); }
+  else cv.fillSmoothRoundRect(x, y, 22, 22, 4, body);
   static const uint8_t P[7][6][2] = {{}, {{11,11}}, {{6,6},{16,16}}, {{6,6},{11,11},{16,16}},
     {{6,6},{16,6},{6,16},{16,16}}, {{6,6},{16,6},{11,11},{6,16},{16,16}},
     {{6,6},{16,6},{6,11},{16,11},{6,16},{16,16}}};
@@ -262,13 +286,13 @@ static void drawOffer() {
   cv.fillRoundRect(MX, OFFER_Y - oy, MW, OFFER_H, 10, C_STATUS);
   cv.drawRoundRect(MX, OFFER_Y - oy, MW, OFFER_H, 10, C_DIM);
   cv.setTextDatum(middle_center);
-  cv.setFont(&fonts::FreeSansBold12pt7b);
+  cv.setFont(&F_B21);
   cv.setTextColor(C_TEXT);
   text(msg, MX + MW / 2, OFFER_Y + 24);
-  cv.setFont(&fonts::FreeSans9pt7b);
+  cv.setFont(&F_S16);
   cv.setTextColor(C_DIM);
   text(offerTxt, MX + MW / 2, OFFER_Y + 54);
-  cv.setFont(&fonts::FreeSans12pt7b);
+  cv.setFont(&F_S21);
   const char* lbl[2] = {"Take", "Drop"};
   for (int i = 0; i < 2; i++) {
     cv.fillRoundRect(buttonX(i), OFFER_BY - oy, BW, BH, 8, C_FELT);
@@ -284,9 +308,9 @@ static int cubeY() { return cubeOwn > 0 ? FB - CUBE_S - 4 : cubeOwn < 0 ? FT + 4
 static void drawCube() {
   int x = BARX + (BARW - CUBE_S) / 2, y = cubeY();
   bool may = phase == ROLL && cubeOwn >= 0 && cubeVal < 64;
-  cv.fillRoundRect(x, y - oy, CUBE_S, CUBE_S, 4, 0xEF3A);
-  if (may) { cv.drawRoundRect(x - 1, y - 1 - oy, CUBE_S + 2, CUBE_S + 2, 5, C_SEL); cv.drawRoundRect(x - 2, y - 2 - oy, CUBE_S + 4, CUBE_S + 4, 6, C_SEL); }
-  cv.setFont(&fonts::FreeSansBold9pt7b);
+  if (may) cv.fillSmoothRoundRect(x - 3, y - 3 - oy, CUBE_S + 6, CUBE_S + 6, 7, C_SEL);
+  cv.fillSmoothRoundRect(x, y - oy, CUBE_S, CUBE_S, 5, 0xEF3A);
+  cv.setFont(&F_B16);
   cv.setTextDatum(middle_center);
   cv.setTextColor(TFT_BLACK);
   number(cubeVal == 1 ? 64 : cubeVal, x + CUBE_S / 2, y + CUBE_S / 2 + 1);
@@ -297,21 +321,21 @@ static void drawMenu() {
   if (MY + MH < oy || MY > oy + BAND) return;
   cv.fillRoundRect(MX, MY - oy, MW, MH, 10, C_STATUS);
   cv.drawRoundRect(MX, MY - oy, MW, MH, 10, C_DIM);
-  cv.setFont(&fonts::FreeSansBold12pt7b);
+  cv.setFont(&F_B21);
   cv.setTextDatum(middle_center);
   cv.setTextColor(C_TEXT);
   text("Menu", MX + MW / 2, MY + 20);
-  cv.setFont(&fonts::FreeSans12pt7b);
+  cv.setFont(&F_S21);
   for (int i = 0; i < 6; i++) {
     bool on = menuEnabled(i);
     cv.fillRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_FELT : C_BAR);
     cv.drawRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_SEL : C_DIM);
     cv.setTextColor(on ? C_TEXT : C_DIM);
     if (i == 5) {  // two lines
-      cv.setFont(&fonts::FreeSans9pt7b);
+      cv.setFont(&F_S16);
       text("Calibrate", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - 9);
       text("touch", buttonX(i) + BW / 2, buttonY(i) + BH / 2 + 10);
-      cv.setFont(&fonts::FreeSans12pt7b);
+      cv.setFont(&F_S21);
     } else text(MENU[i], buttonX(i) + BW / 2, buttonY(i) + BH / 2);
   }
 }
@@ -339,7 +363,7 @@ static void drawBand() {
     cv.drawRect(colX(c), (top ? FT : FB - 5 * STEP - 1) - oy, PW, 5 * STEP + 1, C_SEL);
   }
   // checkers
-  cv.setFont(&fonts::FreeSansBold12pt7b);
+  cv.setFont(&F_B21);
   cv.setTextDatum(middle_center);
   for (int p = 1; p <= 24; p++) {
     int n = g.pts[p]; if (!n) continue;
@@ -373,13 +397,13 @@ static void drawBand() {
     die(TRX + 2, MIDY - 11, dice[0], cpuDice, used0);
     die(TRX + 26, MIDY - 11, dice[1], cpuDice, used1);
     if (dbl && phase == MOVE && !cpuDice) {
-      cv.setFont(&fonts::FreeSans9pt7b); cv.setTextColor(C_TEXT); cv.setTextDatum(middle_center);
+      cv.setFont(&F_S16); cv.setTextColor(C_TEXT); cv.setTextDatum(middle_center);
       char b[4]; snprintf(b, sizeof b, "x%d", nrem);
       text(b, TRX + TRW / 2, MIDY + 22);
     }
   }
   if (phase == ROLL && !tumbling && blinkOn) {
-    cv.setFont(&fonts::FreeSansBold9pt7b); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
+    cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
     text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + 24 : MIDY);
   }
   // targets for the selected checker
@@ -394,7 +418,7 @@ static void drawBand() {
   }
   // status bar: menu | pips | message | eval
   for (int i = 0; i < 3; i++) rect(6, 5 + i * 5, 20, 2, menuOpen ? C_SEL : C_TEXT);
-  cv.setFont(&fonts::FreeSans9pt7b);
+  cv.setFont(&F_S16);
   cv.setTextDatum(middle_left);
   checker(44, 11, true, 7);
   cv.setTextColor(C_TEXT); number(pips(g, 0), 56, 11);
@@ -919,6 +943,7 @@ void setup() {
   lcd.setBrightness(200);
   cv.setColorDepth(16);
   if (!cv.createSprite(W, BAND)) Serial.println("sprite alloc failed");
+  loadFonts();
   Serial.printf("net %s, free heap %u, largest %u\n", netOk ? "ok" : "LOAD FAILED",
                 ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
   auto c = [](uint8_t r, uint8_t g, uint8_t b) { return lcd.color565(r, g, b); };
@@ -926,6 +951,7 @@ void setup() {
   C_PTA = c(0xdc, 0xc9, 0xa0);  C_PTB = c(0xa3, 0x39, 0x2b);
   C_ME = c(0xf3, 0xee, 0xe0);   C_MERIM = c(0x8d, 0x86, 0x76); C_MEIN = c(0xd6, 0xcf, 0xbd);
   C_OP = c(0x26, 0x26, 0x26);   C_OPRIM = c(0xa0, 0xa0, 0xa0); C_OPIN = c(0x3c, 0x3c, 0x3c);
+  C_OPHI = c(0x6a, 0x6a, 0x6a);
   C_BAR = c(0x4a, 0x2f, 0x18);  C_TRAY = c(0x17, 0x3f, 0x28);  C_SEL = c(0xff, 0xd2, 0x3c);
   C_TEXT = c(0xe8, 0xe2, 0xd2); C_DIM = c(0x8a, 0x8a, 0x8a);
   C_GOOD = c(0x7f, 0xe0, 0x8a); C_BAD = c(0xff, 0x8a, 0x7a); C_STATUS = c(0x10, 0x10, 0x10);
