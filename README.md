@@ -1,4 +1,4 @@
-# m5-backgammon
+# Backgammon-NN-esp32
 
 The Backgammon-NN engine on an M5Stack CoreS3 (ESP32-S3, 320x240 touch, 16 MB flash, 8 MB PSRAM).
 
