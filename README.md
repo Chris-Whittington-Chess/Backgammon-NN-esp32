@@ -23,6 +23,19 @@ flash, **no PSRAM**, ST7796S 480x320 SPI panel, XPT2046 resistive touch, CH340 U
 pio run -e e32r40t -t upload
 ```
 
+### Ready-made firmware (no build needed)
+
+Each [release](https://github.com/Chris-Whittington-Chess/Backgammon-NN-esp32/releases) has one
+merged file, `retro-backgammon-<version>-e32r40t.bin`, to write at address 0:
+
+- **From the browser:** the Install button on
+  [whittingtonchess.com/retro-backgammon.html](https://whittingtonchess.com/retro-backgammon.html#install)
+  (Chrome or Edge on a PC or Mac, board plugged in by USB).
+- **With esptool:** `esptool.py --chip esp32 write_flash 0x0 retro-backgammon-<version>-e32r40t.bin`
+
+Making one: `pio run -e e32r40t`, then `python tools/merge_firmware.py <version>` with
+PlatformIO's Python (it has esptool); the file lands in `dist/`.
+
 ### Playing
 
 You are white, moving 24 -> 1 (home board bottom right); the CPU plays the net at 0-ply.
