@@ -435,10 +435,18 @@ static void tap(int x, int y) {
     return;
   }
   // MOVE
-  if (y < 22) {  // undo the turn so far
-    if (memcmp(&g, &turnStart, sizeof g)) { startMove(dice[0], dice[1]); draw(); }
+  // Undo the turn so far: put the checkers back, then re-offer the dice. Only
+  // the top 16 px count, so a slightly high tap on a top point can't hit it.
+  if (y < 16) {
+    if (memcmp(&g, &turnStart, sizeof g)) {
+      g = turnStart;
+      startMove(dice[0], dice[1]);
+      snprintf(msg, sizeof msg, "Undone: play %d-%d", dice[0], dice[1]);
+      draw();
+    }
     return;
   }
+  if (y < FT) return;  // status bar edge / frame: ignore
   int s = hitSpot(x, y);
   Serial.printf("tap %d,%d -> spot %d (sel %d)\n", x, y, s, sel);
   if (sel > 0) {
