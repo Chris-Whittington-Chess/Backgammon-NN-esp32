@@ -442,7 +442,7 @@ static int countAt(const BgBoard& b, bool mine, int p) {
 // Slide a checker from (x0,y0) to (x1,y1), eased, ~120-400 ms by distance.
 static void fly(int x0, int y0, int x1, int y1, bool mine) {
   float dist = sqrtf(float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
-  uint32_t dur = 120 + (uint32_t)(dist * 0.6f), t0 = millis();
+  uint32_t dur = 400 + (uint32_t)(dist * 1.8f), t0 = millis();  // ~0.4-1.2 s
   flying = true; flyMine = mine;
   int px = x0, py = y0, frames = 0;
   for (;; frames++) {
@@ -487,10 +487,10 @@ static void animateStep(const BgBoard& a, const BgBoard& b, int from, int to, bo
 // Tumble the dice in the tray for ~0.4 s before showing d1-d2.
 static void tumble(int d1, int d2, bool cpu) {
   tumbling = true; cpuDice = cpu;
-  for (int i = 0; i < 9; i++) {
+  for (int i = 0; i < 12; i++) {  // slowing down, ~0.9 s in all
     dice[0] = random(1, 7); dice[1] = random(1, 7);
     redrawRegion(TRX, MIDY - 16, W, MIDY + 40);
-    delay(30 + i * 4);
+    delay(40 + i * 8);
   }
   dice[0] = d1; dice[1] = d2;
   tumbling = false;
@@ -553,6 +553,7 @@ static void cpuTurn(int d1, int d2) {
     for (int i = 0; i < len; i++) {
       const BgSub& s = cpuSteps[i];
       auto mapPt = [](int p) { return p == 25 || p == 0 ? p : 25 - p; };
+      if (i) delay(200);  // a beat between the CPU's checkers
       animateStep(bg_swap(cur), bg_swap(s.result), mapPt(s.from), mapPt(s.to), false);
       cur = s.result;
     }
