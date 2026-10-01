@@ -82,7 +82,7 @@ static const int W = 480, H = 320, BAND = 20;  // 19 KB sprite: the heap is frag
 static int oy = 0;  // y offset of the band being rendered
 
 // ---- game state (board always from the human's side: + = you) ----
-enum Phase { ROLL, MOVE, PASS, OVER };
+enum Phase { ROLL, MOVE, PASS, OVER, OFFER };  // OFFER: the CPU has doubled you
 static BgBoard g, turnStart, cpuBefore;
 static Phase phase;
 static int dice[2];             // shown dice
@@ -94,10 +94,14 @@ static bool cpuMarks;           // show the CPU's last move
 static bool hintMarks;          // show the engine's suggested move
 static BgBoard hintBefore, hintAfter;
 static bool menuOpen;
-struct Snap { BgBoard b; int8_t d1, d2; };  // start of one of your turns
+// Start of one of your turns, for take-back (cube state included).
+struct Snap { BgBoard b; int8_t d1, d2; int16_t cubeVal; int8_t cubeOwn; };
 static Snap hist[32];
 static int nhist;
 static int scoreYou, scoreCpu;
+static int cubeVal = 1, cubeOwn = 0;  // owner from your side: +1 you, -1 CPU, 0 centred
+static const float CUBE_X = 0.68f;     // Janowski cube efficiency
+static char offerTxt[40];
 static char msg[48], evalTxt[32];
 static uint16_t evalCol;
 static BgBoard kids[1024];
@@ -236,10 +240,47 @@ static bool canTakeBack() {
 }
 static bool menuEnabled(int i) {
   if (i == 2) return canTakeBack();
-  if (i == 3) return phase == MOVE;
+  if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
   return true;
 }
 static int buttonX(int i) { return MX + 10 + (i % 2) * (BW + 8); }
+
+// The CPU's double: a panel with Take / Drop (buttons 0 and 1 of OFFER_Y's row).
+static const int OFFER_Y = 92, OFFER_H = 150, OFFER_BY = OFFER_Y + 86;
+static void drawOffer() {
+  if (OFFER_Y + OFFER_H < oy || OFFER_Y > oy + BAND) return;
+  cv.fillRoundRect(MX, OFFER_Y - oy, MW, OFFER_H, 10, C_STATUS);
+  cv.drawRoundRect(MX, OFFER_Y - oy, MW, OFFER_H, 10, C_DIM);
+  cv.setTextDatum(middle_center);
+  cv.setFont(&fonts::FreeSansBold12pt7b);
+  cv.setTextColor(C_TEXT);
+  text(msg, MX + MW / 2, OFFER_Y + 24);
+  cv.setFont(&fonts::FreeSans9pt7b);
+  cv.setTextColor(C_DIM);
+  text(offerTxt, MX + MW / 2, OFFER_Y + 54);
+  cv.setFont(&fonts::FreeSans12pt7b);
+  const char* lbl[2] = {"Take", "Drop"};
+  for (int i = 0; i < 2; i++) {
+    cv.fillRoundRect(buttonX(i), OFFER_BY - oy, BW, BH, 8, C_FELT);
+    cv.drawRoundRect(buttonX(i), OFFER_BY - oy, BW, BH, 8, C_SEL);
+    cv.setTextColor(C_TEXT);
+    text(lbl[i], buttonX(i) + BW / 2, OFFER_BY + BH / 2);
+  }
+}
+
+// The cube in the bar: centred, or at the owner's end. Yellow rim = you may double.
+static const int CUBE_S = 26;
+static int cubeY() { return cubeOwn > 0 ? FB - CUBE_S - 4 : cubeOwn < 0 ? FT + 4 : MIDY - CUBE_S / 2; }
+static void drawCube() {
+  int x = BARX + (BARW - CUBE_S) / 2, y = cubeY();
+  bool may = phase == ROLL && cubeOwn >= 0 && cubeVal < 64;
+  cv.fillRoundRect(x, y - oy, CUBE_S, CUBE_S, 4, 0xEF3A);
+  if (may) { cv.drawRoundRect(x - 1, y - 1 - oy, CUBE_S + 2, CUBE_S + 2, 5, C_SEL); cv.drawRoundRect(x - 2, y - 2 - oy, CUBE_S + 4, CUBE_S + 4, 6, C_SEL); }
+  cv.setFont(&fonts::FreeSansBold9pt7b);
+  cv.setTextDatum(middle_center);
+  cv.setTextColor(TFT_BLACK);
+  number(cubeVal == 1 ? 64 : cubeVal, x + CUBE_S / 2, y + CUBE_S / 2 + 1);
+}
 static int buttonY(int i) { return MY + 40 + (i / 2) * (BH + 10); }
 
 static void drawMenu() {
@@ -300,6 +341,7 @@ static void drawBand() {
   int bx = BARX + BARW / 2;
   for (int i = 0; i < g.bar[1]; i++) checker(bx, MIDY - 40 - i * STEP, false);
   for (int i = 0; i < g.bar[0]; i++) checker(bx, MIDY + 40 + i * STEP, true);
+  drawCube();
   if (sel == 25) cv.drawRect(BARX, MIDY + 26 - oy, BARW, g.bar[0] * STEP + 2, C_SEL);
   else if (phase == MOVE && sel < 0 && canMoveFrom(25)) rect(BARX + 4, MIDY + 22, BARW - 8, 4, C_SEL);
   // The CPU's last move (orange) or a hint (cyan): rings where checkers left,
@@ -351,6 +393,7 @@ static void drawBand() {
   cv.setTextColor(C_TEXT); text(msg, 262, 11);
   cv.setTextDatum(middle_right);
   cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
+  if (phase == OFFER && !menuOpen) drawOffer();
   if (menuOpen) drawMenu();
 }
 
@@ -371,10 +414,12 @@ static void setEval() {
   evalCol = eq > 0.1f ? C_GOOD : eq < -0.1f ? C_BAD : C_TEXT;
 }
 
+// pts: 1 single, 2 gammon, 3 backgammon - times the cube; 0 = a dropped double.
 static void gameOver(int pts, bool youWon) {
-  (youWon ? scoreYou : scoreCpu) += pts;
-  const char* kind = pts == 3 ? "backgammon" : pts == 2 ? "gammon" : "single";
-  snprintf(msg, sizeof msg, "%s %d (%s)", youWon ? "You win" : "CPU wins", pts, kind);
+  int won = pts ? pts * cubeVal : cubeVal;
+  (youWon ? scoreYou : scoreCpu) += won;
+  const char* kind = !pts ? "dropped" : pts == 3 ? "backgammon" : pts == 2 ? "gammon" : "single";
+  snprintf(msg, sizeof msg, "%s %d (%s)", youWon ? "You win" : "CPU wins", won, kind);
   snprintf(evalTxt, sizeof evalTxt, "You %d - CPU %d", scoreYou, scoreCpu);
   evalCol = C_TEXT;
   phase = OVER;
@@ -405,7 +450,7 @@ static void cpuTurn(int d1, int d2) {
 static void startMove(int d1, int d2, bool push = true) {
   if (push) {
     if (nhist == 32) { memmove(hist, hist + 1, sizeof hist - sizeof hist[0]); nhist--; }
-    hist[nhist++] = Snap{g, (int8_t)d1, (int8_t)d2};
+    hist[nhist++] = Snap{g, (int8_t)d1, (int8_t)d2, (int16_t)cubeVal, (int8_t)cubeOwn};
   }
   hintMarks = false;
   dice[0] = d1; dice[1] = d2; cpuDice = false;
@@ -422,6 +467,7 @@ static void startMove(int d1, int d2, bool push = true) {
 static void newGame() {
   g = bg_start();
   cpuMarks = hintMarks = false;
+  cubeVal = 1; cubeOwn = 0;
   nhist = 0;
   int a, b;
   do { a = random(1, 7); b = random(1, 7); } while (a == b);
@@ -437,12 +483,44 @@ static void newGame() {
   }
 }
 
+// The net's cube call for whoever is on roll in `onRoll` (mover-relative).
+static BgCubeCall cubeCall(const BgBoard& onRoll, int own) {
+  float p[6];
+  net.eval(onRoll, p);
+  return bg_cube_call(p, own, CUBE_X);
+}
+
 static void endHumanTurn() {
   nsubs = 0; sel = -1;
   draw();
   delay(250);
+  // Before rolling, the CPU may double (cube centred or its own).
+  if (cubeOwn <= 0 && cubeVal < 64) {
+    BgCubeCall c = cubeCall(bg_swap(g), -cubeOwn);
+    Serial.printf("cpu cube: nd %.3f dt %.3f dp %.3f -> %s\n", c.nd, c.dt, c.dp, c.dbl ? "double" : "no double");
+    if (c.dbl) {
+      phase = OFFER;
+      snprintf(msg, sizeof msg, "CPU doubles to %d", cubeVal * 2);
+      float q[6];
+      net.eval(bg_swap(g), q);  // CPU on roll: your wins are its losses (cubeless)
+      snprintf(offerTxt, sizeof offerTxt, "Your chances: %.0f%%", (q[3] + q[4] + q[5]) * 100);
+      cpuMarks = false;
+      return;
+    }
+  }
   cpuTurn(random(1, 7), random(1, 7));
 }
+
+// You double before rolling: the CPU takes or drops by the same model.
+static void humanDouble() {
+  BgCubeCall c = cubeCall(g, cubeOwn);
+  Serial.printf("you double: nd %.3f dt %.3f dp %.3f -> cpu %s\n", c.nd, c.dt, c.dp, c.take ? "takes" : "drops");
+  if (!c.take) { gameOver(0, true); return; }
+  cubeVal *= 2; cubeOwn = -1;
+  snprintf(msg, sizeof msg, "CPU takes - cube at %d", cubeVal);
+}
+
+static bool canDouble() { return phase == ROLL && cubeOwn >= 0 && cubeVal < 64; }
 
 static void applyPath(const Path& p) {
   for (int k = 0; k < p.n; k++) {
@@ -466,12 +544,21 @@ static void takeBack() {
     g = hist[nhist - 1].b;
   }
   const Snap& s = hist[nhist - 1];
+  cubeVal = s.cubeVal; cubeOwn = s.cubeOwn;
   setEval();
   startMove(s.d1, s.d2, false);
   if (phase == MOVE) snprintf(msg, sizeof msg, "Taken back: play %d-%d", s.d1, s.d2);
 }
 
 static void hint() {
+  if (phase == ROLL) {  // before rolling: cube advice
+    if (cubeOwn < 0) { snprintf(msg, sizeof msg, "CPU owns the cube"); return; }
+    BgCubeCall c = cubeCall(g, cubeOwn);
+    bool tooGood = !c.dbl && !c.take && c.nd > c.dp;
+    snprintf(msg, sizeof msg, "%s", c.dbl ? (c.take ? "Double - CPU should take" : "Double - CPU should drop")
+                                 : tooGood ? "Too good - play on" : "No double");
+    return;
+  }
   if (memcmp(&g, &turnStart, sizeof g)) { g = turnStart; startMove(dice[0], dice[1], false); }
   int n = bg_genmoves(g, dice[0], dice[1], kids, 1024);
   float s;
@@ -545,7 +632,25 @@ static void tap(int x, int y) {
   if (y < 26 && x < 40) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
   if (phase == OVER) { newGame(); draw(); return; }
   if (phase == PASS) { endHumanTurn(); draw(); return; }
+  if (phase == OFFER) {
+    for (int i = 0; i < 2; i++) {
+      if (x < buttonX(i) || x >= buttonX(i) + BW || y < OFFER_BY || y >= OFFER_BY + BH) continue;
+      if (i == 1) gameOver(0, false);  // drop: the CPU wins the current cube
+      else {
+        cubeVal *= 2; cubeOwn = 1;
+        cpuTurn(random(1, 7), random(1, 7));
+      }
+      draw();
+      return;
+    }
+    return;
+  }
   if (phase == ROLL) {
+    // Tap the cube to double.
+    if (x >= BARX - 4 && x < BARX + BARW + 4 && abs(y - (cubeY() + CUBE_S / 2)) < CUBE_S) {
+      if (canDouble()) { humanDouble(); draw(); }
+      return;
+    }
     if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) {
       cpuMarks = false;
       startMove(random(1, 7), random(1, 7));
@@ -718,6 +823,23 @@ void loop() {
     if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
+    else if (ch == 'g' || ch == 'h') {
+      // Cube tests on a race. 'g': CPU 60 pips vs your 75, your turn just
+      // ended (the CPU decides whether to double). 'h': the reverse, you on roll.
+      memset(&g, 0, sizeof g);
+      bool cpuAhead = ch == 'g';
+      int a[3] = {4, 5, 6}, b[3] = {3, 4, 5};   // 75 and 60 pips
+      for (int i = 0; i < 3; i++) {
+        g.pts[cpuAhead ? a[i] : b[i]] = 5;           // you
+        g.pts[25 - (cpuAhead ? b[i] : a[i])] = -5;   // CPU (its point k is your 25-k)
+      }
+      cubeVal = 1; cubeOwn = 0; nhist = 0; dice[0] = dice[1] = 0;
+      cpuMarks = hintMarks = false;
+      setEval();
+      if (cpuAhead) endHumanTurn();
+      else { phase = ROLL; snprintf(msg, sizeof msg, "Test: you lead 60-75"); }
+      draw();
+    }
     else if (ch == 'd') dumpFrame();
     else if (ch == 'k') { calibrate(); draw(); }
     else if (ch == 't') { int tx = Serial.parseInt(), ty = Serial.parseInt(); tap(tx, ty); Serial.printf("tap %d %d phase=%d sel=%d\n", tx, ty, phase, sel); }

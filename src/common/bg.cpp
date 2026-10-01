@@ -41,6 +41,48 @@ uint32_t bg_hash(const BgBoard& b) {
   return h;
 }
 
+// ---- doubling cube ----
+// Janowski (1993): cubeful equity = x * live-cube equity + (1 - x) * dead-cube
+// equity. With W / L the average value of a win / loss (gammons included), the
+// live-cube take and cash points are TP = (L - 1/2) / (W + L + 1/2) and
+// CP = (L + 1) / (W + L + 1/2), and live equity is piecewise linear through
+// (0, -L), (TP, -1), (CP, +1), (1, W) - the opponent-owns curve skips CP, the
+// own-cube curve skips TP. Gammonless sanity check: x = 0.68 gives a ~21.4%
+// take point and a ~69% initial doubling point.
+static void win_values(const float q[6], float& pw, float& W, float& L) {
+  pw = q[0] + q[1] + q[2];
+  float pl = q[3] + q[4] + q[5];
+  W = pw > 1e-6f ? (q[0] + 2 * q[1] + 3 * q[2]) / pw : 1.0f;
+  L = pl > 1e-6f ? (q[3] + 2 * q[4] + 3 * q[5]) / pl : 1.0f;
+}
+
+static float lerp_seg(float p, float x0, float y0, float x1, float y1) {
+  return x1 > x0 ? y0 + (y1 - y0) * (p - x0) / (x1 - x0) : y1;
+}
+
+float bg_cubeful(const float q[6], int own, float x) {
+  float p, W, L;
+  win_values(q, p, W, L);
+  float dead = p * W - (1 - p) * L;
+  float tp = (L - 0.5f) / (W + L + 0.5f), cp = (L + 1.0f) / (W + L + 0.5f);
+  float live;
+  if (own > 0)        live = p < cp ? lerp_seg(p, 0, -L, cp, 1) : lerp_seg(p, cp, 1, 1, W);
+  else if (own < 0)   live = p < tp ? lerp_seg(p, 0, -L, tp, -1) : lerp_seg(p, tp, -1, 1, W);
+  else live = p < tp ? lerp_seg(p, 0, -L, tp, -1)
+            : p < cp ? lerp_seg(p, tp, -1, cp, 1) : lerp_seg(p, cp, 1, 1, W);
+  return x * live + (1 - x) * dead;
+}
+
+BgCubeCall bg_cube_call(const float q[6], int own, float x) {
+  BgCubeCall c;
+  c.nd = bg_cubeful(q, own, x);
+  c.dt = 2 * bg_cubeful(q, -1, x);  // after a take the opponent owns a doubled cube
+  c.dp = 1;
+  c.take = c.dt < c.dp;
+  c.dbl = own >= 0 && (c.take ? c.dt : c.dp) > c.nd;
+  return c;
+}
+
 // ---- single-die moves (for_each_single) ----
 struct Single { int8_t from, to; BgBoard b; };
 

@@ -25,6 +25,19 @@ BgBoard bg_start();
 int bg_result(const BgBoard& b);
 uint32_t bg_hash(const BgBoard& b);  // FNV-1a over points[1..24], bar, off
 
+// ---- doubling cube (money play, Janowski's cubeful model) ----
+// p: the net's 6 outcome probabilities for the player ON ROLL (pre-roll).
+// own: cube owner from that player's view: +1 owns it, 0 centred, -1 opponent.
+// x: cube efficiency (0 = dead cube, 1 = fully live); ~0.68 is the usual pick.
+// Equities are per unit of the current cube value.
+float bg_cubeful(const float p[6], int own, float x);
+struct BgCubeCall {
+  float nd, dt, dp;   // no double, double/take, double/pass (doubler's view)
+  bool dbl, take;     // doubler should double; opponent should take
+};
+// The decision for the player on roll, who may double (own >= 0).
+BgCubeCall bg_cube_call(const float p[6], int own, float x);
+
 // 0-ply choice (game.rs EvalEngine): the child maximising the mover's score,
 // where a won child scores its points and any other -equity(net(swap(child))).
 template <class Net>
