@@ -8,7 +8,8 @@
 //
 // Play: you are white, moving 24 -> 1 (home bottom right). Tap the dice to
 // roll, a highlighted point (or the bar) to pick a checker, then a yellow dot
-// (or the tray to bear off). Tap the status bar to undo your turn so far.
+// or ring (or the tray to bear off). The menu (top left) has new game, take
+// back, hint, reset score and touch calibration.
 // Touch calibration runs on first boot (or serial 'k'), saved in NVS.
 // Serial (921600): 'v' verify movegen + move choice against bgcore and time
 // it, 'n' new game, 't X Y' simulated tap, 'k' recalibrate, 'd' dump frame
@@ -90,13 +91,21 @@ static int rem[4], nrem;        // your dice still to play
 static BgSub subs[64];
 static int nsubs, sel = -1;     // sel: 1..24, 25 = bar
 static bool cpuMarks;           // show the CPU's last move
+static bool hintMarks;          // show the engine's suggested move
+static BgBoard hintBefore, hintAfter;
+static bool menuOpen;
+struct Snap { BgBoard b; int8_t d1, d2; };  // start of one of your turns
+static Snap hist[32];
+static int nhist;
 static int scoreYou, scoreCpu;
 static char msg[48], evalTxt[32];
 static uint16_t evalCol;
 static BgBoard kids[1024];
 
 static uint16_t C_FRAME, C_FELT, C_PTA, C_PTB, C_ME, C_MERIM, C_MEIN, C_OP, C_OPRIM, C_OPIN,
-    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU;
+    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU, C_HINT;
+
+static void calibrate();
 
 static int pips(const BgBoard& b, int side) { return bg_pip_count(b, side); }
 
@@ -188,6 +197,65 @@ static bool canMoveFrom(int p) {
   return false;
 }
 
+static void drawMarks(const BgBoard& a, const BgBoard& b, bool mine, uint16_t col) {
+  auto cnt = [mine](const BgBoard& x, int p) { int v = mine ? x.pts[p] : -x.pts[p]; return v > 0 ? v : 0; };
+  for (int p = 1; p <= 24; p++) {
+    int was = cnt(a, p), now = cnt(b, p);
+    if (was == now) continue;
+    // On the stack itself: a dot on the arriving checker, a ring in the slot
+    // the leaving checker vacated.
+    int c; bool top; pointGeom(p, c, top);
+    int x = colX(c) + PW / 2;
+    if (now > was) dot(x, stackY(top, min(now, 5) - 1), 5, col);
+    else {
+      int y = stackY(top, min(now, 4)) - oy;
+      cv.drawCircle(x, y, 7, col); cv.drawCircle(x, y, 6, col);
+    }
+  }
+  int s = mine ? 0 : 1;
+  if (b.off[s] > a.off[s]) dot(TRX + TRW / 2, mine ? FB - 8 - b.off[s] * 8 - 10 : FT + 8 + b.off[s] * 8 + 10, 5, col);
+  if (b.bar[s] < a.bar[s]) { int y = mine ? MIDY + 40 : MIDY - 40; cv.drawCircle(BARX + BARW / 2, y - oy, 5, col); }
+}
+
+// ---- menu (2 x 3 buttons over the board) ----
+static const int MX = 90, MY = 44, MW = 300, MH = 238, BW = 136, BH = 52;
+static const char* const MENU[6] = {"Resume", "New game", "Take back", "Hint", "Reset score", "Calibrate touch"};
+static bool canTakeBack() {
+  if (phase == MOVE) return memcmp(&g, &turnStart, sizeof g) || nhist >= 2;
+  if (phase == PASS) return nhist >= 2;
+  return phase == ROLL && nhist >= 1;
+}
+static bool menuEnabled(int i) {
+  if (i == 2) return canTakeBack();
+  if (i == 3) return phase == MOVE;
+  return true;
+}
+static int buttonX(int i) { return MX + 10 + (i % 2) * (BW + 8); }
+static int buttonY(int i) { return MY + 40 + (i / 2) * (BH + 10); }
+
+static void drawMenu() {
+  if (MY + MH < oy || MY > oy + BAND) return;
+  cv.fillRoundRect(MX, MY - oy, MW, MH, 10, C_STATUS);
+  cv.drawRoundRect(MX, MY - oy, MW, MH, 10, C_DIM);
+  cv.setFont(&fonts::FreeSansBold12pt7b);
+  cv.setTextDatum(middle_center);
+  cv.setTextColor(C_TEXT);
+  text("Menu", MX + MW / 2, MY + 20);
+  cv.setFont(&fonts::FreeSans12pt7b);
+  for (int i = 0; i < 6; i++) {
+    bool on = menuEnabled(i);
+    cv.fillRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_FELT : C_BAR);
+    cv.drawRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_SEL : C_DIM);
+    cv.setTextColor(on ? C_TEXT : C_DIM);
+    if (i == 5) {  // two lines
+      cv.setFont(&fonts::FreeSans9pt7b);
+      text("Calibrate", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - 9);
+      text("touch", buttonX(i) + BW / 2, buttonY(i) + BH / 2 + 10);
+      cv.setFont(&fonts::FreeSans12pt7b);
+    } else text(MENU[i], buttonX(i) + BW / 2, buttonY(i) + BH / 2);
+  }
+}
+
 static void drawBand() {
   rect(0, 0, W, 22, C_STATUS);
   rect(0, 22, W, H - 22, C_FRAME);
@@ -225,17 +293,10 @@ static void drawBand() {
   for (int i = 0; i < g.bar[0]; i++) checker(bx, MIDY + 40 + i * STEP, true);
   if (sel == 25) cv.drawRect(BARX, MIDY + 26 - oy, BARW, g.bar[0] * STEP + 2, C_SEL);
   else if (phase == MOVE && sel < 0 && canMoveFrom(25)) rect(BARX + 4, MIDY + 22, BARW - 8, 4, C_SEL);
-  // The CPU's last move: orange marks where its checkers left and landed.
-  if (cpuMarks) {
-    for (int p = 1; p <= 24; p++) {
-      int was = cpuBefore.pts[p] < 0 ? -cpuBefore.pts[p] : 0, now = g.pts[p] < 0 ? -g.pts[p] : 0;
-      if (was == now) continue;
-      int c; bool top; pointGeom(p, c, top);
-      int y = top ? FT + 5 * STEP + 6 : FB - 5 * STEP - 6;
-      if (now > was) dot(colX(c) + PW / 2, y, 4, C_CPU);
-      else cv.drawCircle(colX(c) + PW / 2, y - oy, 4, C_CPU);
-    }
-  }
+  // The CPU's last move (orange) or a hint (cyan): rings where checkers left,
+  // dots where they landed.
+  if (cpuMarks) drawMarks(cpuBefore, g, false, C_CPU);
+  if (hintMarks) drawMarks(hintBefore, hintAfter, true, C_HINT);
   // borne off
   for (int i = 0; i < g.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
   for (int i = 0; i < g.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
@@ -273,17 +334,19 @@ static void drawBand() {
       else { dot(x, y, 7, C_SEL); dot(x, y, 4, C_FELT); }
     }
   }
-  // status bar: pips | message | eval
+  // status bar: menu | pips | message | eval
+  for (int i = 0; i < 3; i++) rect(6, 5 + i * 5, 20, 2, menuOpen ? C_SEL : C_TEXT);
   cv.setFont(&fonts::FreeSans9pt7b);
   cv.setTextDatum(middle_left);
-  checker(12, 11, true, 7);
-  cv.setTextColor(C_TEXT); number(pips(g, 0), 24, 11);
-  checker(72, 11, false, 7);
-  number(pips(g, 1), 84, 11);
+  checker(44, 11, true, 7);
+  cv.setTextColor(C_TEXT); number(pips(g, 0), 56, 11);
+  checker(100, 11, false, 7);
+  number(pips(g, 1), 112, 11);
   cv.setTextDatum(middle_center);
-  cv.setTextColor(C_TEXT); text(msg, 236, 11);
+  cv.setTextColor(C_TEXT); text(msg, 262, 11);
   cv.setTextDatum(middle_right);
   cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
+  if (menuOpen) drawMenu();
 }
 
 static void draw() {
@@ -333,7 +396,13 @@ static void cpuTurn(int d1, int d2) {
   setEval();
 }
 
-static void startMove(int d1, int d2) {
+// Begin your turn with d1-d2. push: record it in the take-back history.
+static void startMove(int d1, int d2, bool push = true) {
+  if (push) {
+    if (nhist == 32) { memmove(hist, hist + 1, sizeof hist - sizeof hist[0]); nhist--; }
+    hist[nhist++] = Snap{g, (int8_t)d1, (int8_t)d2};
+  }
+  hintMarks = false;
   dice[0] = d1; dice[1] = d2; cpuDice = false;
   nrem = 0;
   rem[nrem++] = d1; rem[nrem++] = d2;
@@ -347,7 +416,8 @@ static void startMove(int d1, int d2) {
 
 static void newGame() {
   g = bg_start();
-  cpuMarks = false;
+  cpuMarks = hintMarks = false;
+  nhist = 0;
   int a, b;
   do { a = random(1, 7); b = random(1, 7); } while (a == b);
   dice[0] = dice[1] = 0;
@@ -378,7 +448,50 @@ static void applyPath(const Path& p) {
   sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
   if (!nsubs) endHumanTurn();
-  else snprintf(msg, sizeof msg, "Tap this bar to undo");
+  else snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
+}
+
+// ---- menu actions ----
+static void takeBack() {
+  cpuMarks = hintMarks = false;
+  if (phase == MOVE && memcmp(&g, &turnStart, sizeof g)) {
+    g = turnStart;  // undo this turn's moves
+  } else {
+    if (phase != ROLL) nhist--;  // drop the current turn, go to the one before
+    g = hist[nhist - 1].b;
+  }
+  const Snap& s = hist[nhist - 1];
+  setEval();
+  startMove(s.d1, s.d2, false);
+  if (phase == MOVE) snprintf(msg, sizeof msg, "Taken back: play %d-%d", s.d1, s.d2);
+}
+
+static void hint() {
+  if (memcmp(&g, &turnStart, sizeof g)) { g = turnStart; startMove(dice[0], dice[1], false); }
+  int n = bg_genmoves(g, dice[0], dice[1], kids, 1024);
+  float s;
+  int best = bg_best(net, kids, n, &s);
+  hintBefore = g; hintAfter = kids[best];
+  hintMarks = true; cpuMarks = false;
+  snprintf(msg, sizeof msg, "Hint shown (%+.2f)", s);
+}
+
+static void menuTap(int x, int y) {
+  int hit = -1;
+  for (int i = 0; i < 6; i++)
+    if (x >= buttonX(i) && x < buttonX(i) + BW && y >= buttonY(i) && y < buttonY(i) + BH) hit = i;
+  bool inside = x >= MX && x < MX + MW && y >= MY && y < MY + MH;
+  if (hit < 0) { if (!inside) { menuOpen = false; draw(); } return; }
+  if (!menuEnabled(hit)) return;
+  menuOpen = false;
+  switch (hit) {
+    case 1: newGame(); break;
+    case 2: takeBack(); break;
+    case 3: hint(); break;
+    case 4: scoreYou = scoreCpu = 0; snprintf(msg, sizeof msg, "Score reset"); break;
+    case 5: calibrate(); break;
+  }
+  draw();
 }
 
 // Why a checker on point p (or the bar, 25) can't move right now.
@@ -423,6 +536,8 @@ static int hitSpot(int x, int y) {
 }
 
 static void tap(int x, int y) {
+  if (menuOpen) { menuTap(x, y); return; }
+  if (y < 26 && x < 40) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
   if (phase == OVER) { newGame(); draw(); return; }
   if (phase == PASS) { endHumanTurn(); draw(); return; }
   if (phase == ROLL) {
@@ -434,19 +549,9 @@ static void tap(int x, int y) {
     }
     return;
   }
-  // MOVE
-  // Undo the turn so far: put the checkers back, then re-offer the dice. Only
-  // the top 16 px count, so a slightly high tap on a top point can't hit it.
-  if (y < 16) {
-    if (memcmp(&g, &turnStart, sizeof g)) {
-      g = turnStart;
-      startMove(dice[0], dice[1]);
-      snprintf(msg, sizeof msg, "Undone: play %d-%d", dice[0], dice[1]);
-      draw();
-    }
-    return;
-  }
-  if (y < FT) return;  // status bar edge / frame: ignore
+  // MOVE (undo is Menu > Take back)
+  if (y < FT) return;  // status bar / frame: ignore
+  hintMarks = false;
   int s = hitSpot(x, y);
   Serial.printf("tap %d,%d -> spot %d (sel %d)\n", x, y, s, sel);
   if (sel > 0) {
@@ -541,7 +646,7 @@ void setup() {
   C_BAR = c(0x4a, 0x2f, 0x18);  C_TRAY = c(0x17, 0x3f, 0x28);  C_SEL = c(0xff, 0xd2, 0x3c);
   C_TEXT = c(0xe8, 0xe2, 0xd2); C_DIM = c(0x8a, 0x8a, 0x8a);
   C_GOOD = c(0x7f, 0xe0, 0x8a); C_BAD = c(0xff, 0x8a, 0x7a); C_STATUS = c(0x10, 0x10, 0x10);
-  C_CPU = c(0xff, 0x9a, 0x3c);
+  C_CPU = c(0xff, 0x9a, 0x3c);    C_HINT = c(0x4c, 0xd6, 0xf0);
   randomSeed(esp_random());
   prefs.begin("bg", false);
   uint16_t cal[8];
