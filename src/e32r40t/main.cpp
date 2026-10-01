@@ -94,6 +94,8 @@ static bool cpuMarks;           // show the CPU's last move
 static bool hintMarks;          // show the engine's suggested move
 static BgBoard hintBefore, hintAfter;
 static bool menuOpen;
+static bool flying, flyMine, tumbling;  // animation: a checker in flight / dice rolling
+static int flyX, flyY;
 // Start of one of your turns, for take-back (cube state included).
 struct Snap { BgBoard b; int8_t d1, d2; int16_t cubeVal; int8_t cubeOwn; };
 static Snap hist[32];
@@ -348,6 +350,7 @@ static void drawBand() {
   // dots where they landed.
   if (cpuMarks) drawMarks(cpuBefore, g, false, C_CPU);
   if (hintMarks) drawMarks(hintBefore, hintAfter, true, C_HINT);
+  if (flying) checker(flyX, flyY, flyMine);
   // borne off
   for (int i = 0; i < g.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
   for (int i = 0; i < g.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
@@ -367,7 +370,7 @@ static void drawBand() {
       text(b, TRX + TRW / 2, MIDY + 22);
     }
   }
-  if (phase == ROLL) {
+  if (phase == ROLL && !tumbling) {
     cv.setFont(&fonts::FreeSansBold9pt7b); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
     text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + 24 : MIDY);
   }
@@ -404,6 +407,112 @@ static void draw() {
   }
 }
 
+// ---- animation ----
+// Redraw just the rectangle [x0,x1) x [y0,y1): only the bands it touches, with
+// both the sprite and the panel clipped to its columns, so a frame costs a few
+// ms instead of a full ~100 ms redraw.
+static void redrawRegion(int x0, int y0, int x1, int y1) {
+  x0 = max(x0, 0); x1 = min(x1, W); y0 = max(y0, 0); y1 = min(y1, H);
+  if (x0 >= x1 || y0 >= y1) return;
+  for (oy = y0 / BAND * BAND; oy < y1; oy += BAND) {
+    cv.setClipRect(x0, 0, x1 - x0, BAND);
+    drawBand();
+    cv.clearClipRect();
+    lcd.setClipRect(x0, oy, x1 - x0, BAND);
+    cv.pushSprite(0, oy);
+    lcd.clearClipRect();
+  }
+}
+
+// Screen centre of the checker in slot i (0 = bottom of the stack) of spot p
+// for one side: p 1..24 point, 25 bar, 0 borne off.
+static void slotXY(bool mine, int p, int i, int& x, int& y) {
+  if (p == 25) { x = BARX + BARW / 2; y = mine ? MIDY + 40 + i * STEP : MIDY - 40 - i * STEP; return; }
+  if (p == 0) { x = TRX + TRW / 2; y = mine ? FB - 6 - i * 8 : FT + 5 + i * 8; return; }
+  int c; bool top; pointGeom(p, c, top);
+  x = colX(c) + PW / 2; y = stackY(top, min(i, 4));
+}
+static int countAt(const BgBoard& b, bool mine, int p) {
+  if (p == 25) return b.bar[mine ? 0 : 1];
+  if (p == 0) return b.off[mine ? 0 : 1];
+  int v = mine ? b.pts[p] : -b.pts[p];
+  return v > 0 ? v : 0;
+}
+
+// Slide a checker from (x0,y0) to (x1,y1), eased, ~120-400 ms by distance.
+static void fly(int x0, int y0, int x1, int y1, bool mine) {
+  float dist = sqrtf(float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
+  uint32_t dur = 120 + (uint32_t)(dist * 0.6f), t0 = millis();
+  flying = true; flyMine = mine;
+  int px = x0, py = y0, frames = 0;
+  for (;; frames++) {
+    float t = min(1.0f, (millis() - t0) / float(dur));
+    float e = t * t * (3 - 2 * t);  // smoothstep
+    flyX = x0 + int((x1 - x0) * e); flyY = y0 + int((y1 - y0) * e);
+    redrawRegion(min(px, flyX) - CR - 2, min(py, flyY) - CR - 2, max(px, flyX) + CR + 3, max(py, flyY) + CR + 3);
+    px = flyX; py = flyY;
+    if (t >= 1) break;
+  }
+  flying = false;
+  Serial.printf("fly %.0f px: %d frames in %u ms\n", dist, frames + 1, millis() - t0);
+}
+
+// Animate one checker step from board a to board b (both from your side).
+// from / to: 1..24, 25 = bar, 0 = off. A hit then sends the blot to the bar.
+static void animateStep(const BgBoard& a, const BgBoard& b, int from, int to, bool mine) {
+  int x0, y0, x1, y1;
+  slotXY(mine, from, countAt(a, mine, from) - 1, x0, y0);
+  BgBoard mid = a;  // the board without the moving checker
+  if (from == 25) mid.bar[mine ? 0 : 1]--;
+  else mid.pts[from] += mine ? -1 : 1;
+  slotXY(mine, to, countAt(mid, mine, to), x1, y1);
+  g = mid;
+  fly(x0, y0, x1, y1, mine);
+  int opp = mine ? 1 : 0;
+  const int R = CR + 3;
+  if (b.bar[opp] > a.bar[opp]) {  // hit: the blot flies to the bar
+    BgBoard m2 = b;
+    m2.bar[opp]--;
+    g = m2;
+    int bx, by;
+    slotXY(!mine, 25, b.bar[opp] - 1, bx, by);
+    fly(x1, y1, bx, by, !mine);
+    g = b;
+    redrawRegion(bx - R, by - R, bx + R, by + R);
+  }
+  g = b;
+  redrawRegion(x1 - R, y1 - R, x1 + R, y1 + R);  // settle: stack count label, tray slab
+}
+
+// Tumble the dice in the tray for ~0.4 s before showing d1-d2.
+static void tumble(int d1, int d2, bool cpu) {
+  tumbling = true; cpuDice = cpu;
+  for (int i = 0; i < 9; i++) {
+    dice[0] = random(1, 7); dice[1] = random(1, 7);
+    redrawRegion(TRX, MIDY - 16, W, MIDY + 40);
+    delay(30 + i * 4);
+  }
+  dice[0] = d1; dice[1] = d2;
+  tumbling = false;
+  redrawRegion(TRX, MIDY - 16, W, MIDY + 40);
+}
+
+// The CPU's chosen result as single checker steps (CPU-relative), via the same
+// sub-move generator a human turn uses. Returns the number of steps.
+static BgSub cpuSteps[4];
+static bool findSteps(const BgBoard& b, const int* d, int n, const BgBoard& target, int depth, int& len) {
+  static BgSub lv[4][64];
+  int k = n ? bg_next_submoves(b, d, n, lv[depth], 64) : 0;
+  if (!k) { len = depth; return !memcmp(&b, &target, sizeof b); }
+  for (int i = 0; i < k; i++) {
+    int d2[4], n2 = 0; bool used = false;
+    for (int j = 0; j < n; j++) { if (!used && d[j] == lv[depth][i].die) { used = true; continue; } d2[n2++] = d[j]; }
+    cpuSteps[depth] = lv[depth][i];
+    if (findSteps(lv[depth][i].result, d2, n2, target, depth + 1, len)) return true;
+  }
+  return false;
+}
+
 // ---- game flow ----
 static void setEval() {
   // Your chances with you on roll, from the net.
@@ -427,18 +536,29 @@ static void gameOver(int pts, bool youWon) {
 }
 
 static void cpuTurn(int d1, int d2) {
-  dice[0] = d1; dice[1] = d2; cpuDice = true;
   snprintf(msg, sizeof msg, "CPU rolls %d-%d...", d1, d2);
   nsubs = 0; sel = -1; cpuMarks = false;
   draw();
+  tumble(d1, d2, true);
   uint32_t t0 = millis();
   BgBoard me = bg_swap(g);
   int n = bg_genmoves(me, d1, d2, kids, 1024);
   int best = bg_best(net, kids, n);
+  uint32_t ms = millis() - t0;
   cpuBefore = g;
+  // Play it out checker by checker (CPU point p is your 25-p; bar and off keep 25 / 0).
+  int dl[4] = {d1, d2, d1, d1}, len = 0;
+  if (findSteps(me, dl, d1 == d2 ? 4 : 2, kids[best], 0, len)) {
+    BgBoard cur = me;
+    for (int i = 0; i < len; i++) {
+      const BgSub& s = cpuSteps[i];
+      auto mapPt = [](int p) { return p == 25 || p == 0 ? p : 25 - p; };
+      animateStep(bg_swap(cur), bg_swap(s.result), mapPt(s.from), mapPt(s.to), false);
+      cur = s.result;
+    }
+  }
   g = bg_swap(kids[best]);
   cpuMarks = true;
-  uint32_t ms = millis() - t0;
   Serial.printf("cpu %d-%d: %d moves, %u ms\n", d1, d2, n, ms);
   if (int r = bg_result(kids[best])) { gameOver(r, false); return; }
   snprintf(msg, sizeof msg, n == 1 && !memcmp(&kids[0], &me, sizeof me) ? "CPU can't move" : "CPU played %d-%d", d1, d2);
@@ -523,7 +643,9 @@ static void humanDouble() {
 static bool canDouble() { return phase == ROLL && cubeOwn >= 0 && cubeVal < 64; }
 
 static void applyPath(const Path& p) {
+  sel = -1; npaths = 0;  // no selection / target markers while it moves
   for (int k = 0; k < p.n; k++) {
+    animateStep(g, p.step[k].result, p.step[k].from, p.step[k].to, true);
     g = p.step[k].result;
     for (int i = 0; i < nrem; i++) if (rem[i] == p.step[k].die) { rem[i] = rem[--nrem]; break; }
   }
@@ -653,7 +775,9 @@ static void tap(int x, int y) {
     }
     if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) {
       cpuMarks = false;
-      startMove(random(1, 7), random(1, 7));
+      int d1 = random(1, 7), d2 = random(1, 7);
+      tumble(d1, d2, false);
+      startMove(d1, d2);
       if (phase == MOVE) snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
       draw();
     }
