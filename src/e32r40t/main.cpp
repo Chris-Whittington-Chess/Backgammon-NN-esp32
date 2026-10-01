@@ -96,9 +96,11 @@ static BgNet net;
 static bool netOk;
 static const int W = 480, H = 320, BAND = 20;  // 19 KB sprite: the heap is fragmented
 static int oy = 0;  // y offset of the band being rendered
+static int clipX0 = 0, clipX1 = 480;  // columns being redrawn: skip shapes outside them
 
 // ---- game state (board always from the human's side: + = you) ----
-enum Phase { ROLL, MOVE, PASS, OVER, OFFER };  // OFFER: the CPU has doubled you
+// DONE: all your dice played, waiting for you to tap the dice to hand over.
+enum Phase { ROLL, MOVE, PASS, OVER, OFFER, DONE };  // OFFER: the CPU has doubled you
 static BgBoard g, turnStart, cpuBefore;
 static Phase phase;
 static int dice[2];             // shown dice
@@ -195,7 +197,7 @@ static int pointCX(int p) { int c; bool t; pointGeom(p, c, t); return colX(c) + 
 // ---- drawing (screen coordinates; shifted by the band offset) ----
 static void checker(int cx, int cy, bool mine, int r = CR) {
   cy -= oy;
-  if (cy < -r || cy > BAND + r) return;
+  if (cy < -r || cy > BAND + r || cx + r < clipX0 || cx - r >= clipX1) return;
   // Rim, face, a smooth inner ring, and a small highlight up-left.
   cv.fillSmoothCircle(cx, cy, r, mine ? C_MERIM : C_OPRIM);
   cv.fillSmoothCircle(cx, cy, r - 1, mine ? C_ME : C_OP);
@@ -209,6 +211,7 @@ static void rect(int x, int y, int w, int h, uint16_t c) { cv.fillRect(x, y - oy
 static void dot(int x, int y, int r, uint16_t c) { cv.fillSmoothCircle(x, y - oy, r, c); }
 static void tri(int x0, bool top, uint16_t col) {
   // Filled, then the two long edges re-drawn anti-aliased so they don't stair-step.
+  if (x0 + PW <= clipX0 || x0 >= clipX1) return;
   int by = (top ? FT : FB - 1) - oy, ty = (top ? FT + PH : FB - PH) - oy, tx = x0 + PW / 2;
   cv.fillTriangle(x0, by, x0 + PW - 1, by, tx, ty, col);
   cv.drawSmoothLine(x0, by, tx, ty, col);
@@ -267,12 +270,13 @@ static const int MX = 90, MY = 44, MW = 300, MH = 238, BW = 136, BH = 52;
 // Tapping outside the panel (or the menu icon) closes it.
 static const char* const MENU[6] = {"Undo step", "New game", "Undo move", "Hint", "Reset score", "Calibrate touch"};
 static bool canTakeBack() {
+  if (phase == DONE) return true;
   if (phase == MOVE) return memcmp(&g, &turnStart, sizeof g) || nhist >= 2;
   if (phase == PASS) return nhist >= 2;
   return phase == ROLL && nhist >= 1;
 }
 static bool menuEnabled(int i) {
-  if (i == 0) return phase == MOVE && nsteps > 0;
+  if (i == 0) return (phase == MOVE || phase == DONE) && nsteps > 0;
   if (i == 2) return canTakeBack();
   if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
   return true;
@@ -347,9 +351,11 @@ static void drawBand() {
   rect(RFX, FT, 6 * PW, FB - FT, C_FELT);
   rect(BARX, 22, BARW, H - 22, C_BAR);
   rect(TRX, FT, TRW, FB - FT, C_TRAY);
+  // Points, skipping a row whose triangles don't reach this band.
+  bool topRow = oy < FT + PH + 1, botRow = oy + BAND > FB - PH - 1;
   for (int c = 0; c < 12; c++) {
-    tri(colX(c), true, c % 2 ? C_PTB : C_PTA);
-    tri(colX(c), false, c % 2 ? C_PTA : C_PTB);
+    if (topRow) tri(colX(c), true, c % 2 ? C_PTB : C_PTA);
+    if (botRow) tri(colX(c), false, c % 2 ? C_PTA : C_PTB);
   }
   // Movable checkers: a yellow bar at the point's base (or the bar).
   if (phase == MOVE && sel < 0) {
@@ -370,7 +376,9 @@ static void drawBand() {
     bool mine = n > 0; int a = abs(n), c; bool top; pointGeom(p, c, top);
     int cx = colX(c) + PW / 2;
     for (int i = 0; i < min(a, 5); i++) checker(cx, stackY(top, i), mine);
-    if (a > 5) { cv.setTextColor(mine ? TFT_BLACK : C_ME); number(a, cx, stackY(top, 4) + 1); }
+    if (a > 5 && abs(stackY(top, 4) - oy - BAND / 2) < BAND) {
+      cv.setTextColor(mine ? TFT_BLACK : C_ME); number(a, cx, stackY(top, 4) + 1);
+    }
   }
   int bx = BARX + BARW / 2;
   for (int i = 0; i < g.bar[1]; i++) checker(bx, MIDY - 40 - i * STEP, false);
@@ -390,7 +398,7 @@ static void drawBand() {
   if (dice[0]) {
     bool dbl = dice[0] == dice[1];
     bool used0 = false, used1 = false;
-    if (phase == MOVE && !cpuDice && !dbl) {
+    if ((phase == MOVE || phase == DONE) && !cpuDice && !dbl) {
       used0 = true; used1 = true;
       for (int i = 0; i < nrem; i++) { if (rem[i] == dice[0]) used0 = false; if (rem[i] == dice[1]) used1 = false; }
     }
@@ -401,6 +409,10 @@ static void drawBand() {
       char b[4]; snprintf(b, sizeof b, "x%d", nrem);
       text(b, TRX + TRW / 2, MIDY + 22);
     }
+  }
+  if (phase == DONE && blinkOn) {  // hand the dice over
+    cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
+    text("DONE", TRX + TRW / 2, MIDY + 24);
   }
   if (phase == ROLL && !tumbling && blinkOn) {
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
@@ -416,20 +428,23 @@ static void drawBand() {
       else { dot(x, y, 7, C_SEL); dot(x, y, 4, C_FELT); }
     }
   }
-  // status bar: menu | pips | message | eval
-  for (int i = 0; i < 3; i++) rect(6, 5 + i * 5, 20, 2, menuOpen ? C_SEL : C_TEXT);
-  cv.setFont(&F_S16);
-  cv.setTextDatum(middle_left);
-  checker(44, 11, true, 7);
-  cv.setTextColor(C_TEXT); number(pips(g, 0), 56, 11);
-  checker(100, 11, false, 7);
-  number(pips(g, 1), 112, 11);
-  cv.setTextDatum(middle_center);
-  // Waiting for a tap to pass / start a new game: the message pulses.
-  cv.setTextColor((phase == PASS || phase == OVER) && !blinkOn ? C_DIM : C_TEXT);
-  text(msg, 262, 11);
-  cv.setTextDatum(middle_right);
-  cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
+  // status bar: menu | pips | message | eval (only in the bands it occupies -
+  // smooth-font text is the costliest thing on the screen)
+  if (oy < 22) {
+    for (int i = 0; i < 3; i++) rect(6, 5 + i * 5, 20, 2, menuOpen ? C_SEL : C_TEXT);
+    cv.setFont(&F_S16);
+    cv.setTextDatum(middle_left);
+    checker(44, 11, true, 7);
+    cv.setTextColor(C_TEXT); number(pips(g, 0), 56, 11);
+    checker(100, 11, false, 7);
+    number(pips(g, 1), 112, 11);
+    cv.setTextDatum(middle_center);
+    // Waiting for a tap to pass / start a new game: the message pulses.
+    cv.setTextColor((phase == PASS || phase == OVER) && !blinkOn ? C_DIM : C_TEXT);
+    text(msg, 262, 11);
+    cv.setTextDatum(middle_right);
+    cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
+  }
   if (phase == OFFER && !menuOpen) drawOffer();
   if (menuOpen) drawMenu();
 }
@@ -450,7 +465,9 @@ static void redrawRegion(int x0, int y0, int x1, int y1) {
   if (x0 >= x1 || y0 >= y1) return;
   for (oy = y0 / BAND * BAND; oy < y1; oy += BAND) {
     cv.setClipRect(x0, 0, x1 - x0, BAND);
+    clipX0 = x0; clipX1 = x1;
     drawBand();
+    clipX0 = 0; clipX1 = W;
     cv.clearClipRect();
     lcd.setClipRect(x0, oy, x1 - x0, BAND);
     cv.pushSprite(0, oy);
@@ -689,7 +706,7 @@ static void applyPath(const Path& p) {
   if (int r = bg_result(g)) { gameOver(r, true); return; }
   sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
-  if (!nsubs) endHumanTurn();
+  if (!nsubs) { phase = DONE; snprintf(msg, sizeof msg, "Tap the dice to finish"); }
   else snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
 }
 
@@ -701,12 +718,13 @@ static void undoStep() {
   memcpy(rem, s.rem, sizeof rem); nrem = s.nrem;
   sel = -1; npaths = 0; hintMarks = false;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
+  phase = MOVE;
   snprintf(msg, sizeof msg, "Step undone: %d to play", nrem);
 }
 
 static void takeBack() {
   cpuMarks = hintMarks = false;
-  if (phase == MOVE && memcmp(&g, &turnStart, sizeof g)) {
+  if ((phase == MOVE || phase == DONE) && memcmp(&g, &turnStart, sizeof g)) {
     g = turnStart;  // undo this turn's moves
   } else {
     if (phase != ROLL) nhist--;  // drop the current turn, go to the one before
@@ -831,7 +849,12 @@ static void tap(int x, int y) {
     }
     return;
   }
-  // MOVE (undo is Menu > Take back)
+  if (phase == DONE) {  // only the dice do anything now: hand over
+    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) { endHumanTurn(); draw(); }
+    else { snprintf(msg, sizeof msg, "Tap the dice to finish"); draw(); }
+    return;
+  }
+  // MOVE (undo is in the menu)
   if (y < FT) return;  // status bar / frame: ignore
   hintMarks = false;
   int s = hitSpot(x, y);
@@ -868,7 +891,6 @@ static void tap(int x, int y) {
   if (src > 0 && src != sel) {
     sel = src;
     computePaths();
-    if (npaths == 1) { applyPath(paths[0]); draw(); return; }  // only one place to go
     snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
   } else {
     bool mine = s == 25 ? g.bar[0] > 0 : s > 0 && g.pts[s] > 0;
@@ -973,10 +995,10 @@ void setup() {
 void loop() {
   // Wink the prompt you're expected to act on (~2 Hz), redrawing only it.
   static uint32_t lastBlink = 0;
-  if (netOk && !menuOpen && millis() - lastBlink > 450 && (phase == ROLL || phase == PASS || phase == OVER)) {
+  if (netOk && !menuOpen && millis() - lastBlink > 450 && (phase == ROLL || phase == PASS || phase == OVER || phase == DONE)) {
     lastBlink = millis();
     blinkOn = !blinkOn;
-    if (phase == ROLL) redrawRegion(TRX, MIDY - 12, W, MIDY + 40);
+    if (phase == ROLL || phase == DONE) redrawRegion(TRX, MIDY - 12, W, MIDY + 40);
     else redrawRegion(140, 0, 385, 22);
   } else if (phase == MOVE || phase == OFFER) blinkOn = true;
   // Resistive touch: the first samples of a press are unreliable, so collect
