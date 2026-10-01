@@ -430,7 +430,7 @@ static void drawBand() {
   for (int i = 0; i < g.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
   for (int i = 0; i < g.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
   // dice
-  if (dice[0]) {
+  if (dice[0] && phase != OVER) {
     bool dbl = dice[0] == dice[1];
     bool used0 = false, used1 = false;
     if ((phase == MOVE || phase == DONE || phase == PASS) && !cpuDice && (!dbl || phase == PASS)) {
@@ -445,6 +445,11 @@ static void drawBand() {
       char b[4]; snprintf(b, sizeof b, "x%d", nrem);
       text(b, TRX + TRW / 2, MIDY + 22);
     }
+  }
+  if (phase == OVER && blinkOn) {  // the game is over: the tray starts the next
+    cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
+    text("NEW", TRX + TRW / 2, MIDY - 9);
+    text("GAME", TRX + TRW / 2, MIDY + 9);
   }
   if ((phase == DONE || phase == PASS) && blinkOn) {  // hand the dice over
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
@@ -476,7 +481,7 @@ static void drawBand() {
     number(pips(g, 1), 112, 11);
     cv.setTextDatum(middle_center);
     // Waiting for a tap to pass / start a new game: the message pulses.
-    cv.setTextColor(phase == OVER && !blinkOn ? C_DIM : C_TEXT);
+    cv.setTextColor(C_TEXT);
     text(msg, 262, 11);
     cv.setTextDatum(middle_right);
     cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
@@ -616,7 +621,7 @@ static void gameOver(int pts, bool youWon, const char* how = nullptr) {
   (youWon ? scoreYou : scoreCpu) += won;
   const char* kind = how ? how : !pts ? "dropped" : pts == 3 ? "backgammon" : pts == 2 ? "gammon" : "single";
   snprintf(msg, sizeof msg, "%s %d (%s)", youWon ? "You win" : "CPU wins", won, kind);
-  snprintf(evalTxt, sizeof evalTxt, "You %d - CPU %d", scoreYou, scoreCpu);
+  snprintf(evalTxt, sizeof evalTxt, "Score %d-%d", scoreYou, scoreCpu);  // you-CPU
   evalCol = C_TEXT;
   phase = OVER;
   sel = -1; nsubs = 0;
@@ -907,7 +912,10 @@ static int hitSpot(int x, int y) {
 static void tap(int x, int y) {
   if (menuOpen) { menuTap(x, y); return; }
   if (y < 26 && x < 40) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
-  if (phase == OVER) { newGame(); draw(); return; }
+  if (phase == OVER) {  // only NEW GAME (the tray) starts the next game
+    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) { newGame(); draw(); }
+    return;
+  }
   if (phase == PASS) {  // no legal move: the dice hand over, as for DONE
     if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) { endHumanTurn(); draw(); }
     else { snprintf(msg, sizeof msg, "No legal move: tap the dice"); draw(); }
@@ -1099,8 +1107,7 @@ void loop() {
   if (netOk && !menuOpen && millis() - lastBlink > 450 && (phase == ROLL || phase == PASS || phase == OVER || phase == DONE)) {
     lastBlink = millis();
     blinkOn = !blinkOn;
-    if (phase != OVER) redrawRegion(TRX, MIDY - 12, W, MIDY + 40);
-    else redrawRegion(140, 0, 385, 22);
+    redrawRegion(TRX, MIDY - 20, W, MIDY + 40);
   } else if (phase == MOVE || phase == OFFER) blinkOn = true;
   // Resistive touch: the first samples of a press are unreliable, so collect
   // the whole press and act on release at the median position.

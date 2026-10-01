@@ -79,8 +79,8 @@ hand over, as with DONE.
 | Calibrate touch | Re-run the 4-corner touch calibration |
 | Close | Close the menu |
 
-When a game ends the status message pulses with the result and score; tap to start the next
-game. Touch calibration also runs on first boot and is stored in NVS.
+When a game ends (played out, dropped or resigned) the status bar shows the result and score
+(you-CPU), and NEW GAME blinks in the tray: tap it to start the next game. Touch calibration also runs on first boot and is stored in NVS.
 
 ### How it fits without PSRAM
 
