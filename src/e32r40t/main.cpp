@@ -377,6 +377,7 @@ static void drawBand() {
     int cx = colX(c) + PW / 2;
     for (int i = 0; i < min(a, 5); i++) checker(cx, stackY(top, i), mine);
     if (a > 5 && abs(stackY(top, 4) - oy - BAND / 2) < BAND) {
+      cv.setFont(a >= 10 ? &F_B16 : &F_B21);  // two digits must fit on the checker
       cv.setTextColor(mine ? TFT_BLACK : C_ME); number(a, cx, stackY(top, 4) + 1);
     }
   }
@@ -398,9 +399,10 @@ static void drawBand() {
   if (dice[0]) {
     bool dbl = dice[0] == dice[1];
     bool used0 = false, used1 = false;
-    if ((phase == MOVE || phase == DONE) && !cpuDice && !dbl) {
+    if ((phase == MOVE || phase == DONE || phase == PASS) && !cpuDice && (!dbl || phase == PASS)) {
       used0 = true; used1 = true;
-      for (int i = 0; i < nrem; i++) { if (rem[i] == dice[0]) used0 = false; if (rem[i] == dice[1]) used1 = false; }
+      if (phase != PASS)  // a dance leaves both dice unusable
+        for (int i = 0; i < nrem; i++) { if (rem[i] == dice[0]) used0 = false; if (rem[i] == dice[1]) used1 = false; }
     }
     die(TRX + 2, MIDY - 11, dice[0], cpuDice, used0);
     die(TRX + 26, MIDY - 11, dice[1], cpuDice, used1);
@@ -410,9 +412,9 @@ static void drawBand() {
       text(b, TRX + TRW / 2, MIDY + 22);
     }
   }
-  if (phase == DONE && blinkOn) {  // hand the dice over
+  if ((phase == DONE || phase == PASS) && blinkOn) {  // hand the dice over
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
-    text("DONE", TRX + TRW / 2, MIDY + 24);
+    text(phase == PASS ? "PASS" : "DONE", TRX + TRW / 2, MIDY + 24);
   }
   if (phase == ROLL && !tumbling && blinkOn) {
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
@@ -440,7 +442,7 @@ static void drawBand() {
     number(pips(g, 1), 112, 11);
     cv.setTextDatum(middle_center);
     // Waiting for a tap to pass / start a new game: the message pulses.
-    cv.setTextColor((phase == PASS || phase == OVER) && !blinkOn ? C_DIM : C_TEXT);
+    cv.setTextColor(phase == OVER && !blinkOn ? C_DIM : C_TEXT);
     text(msg, 262, 11);
     cv.setTextDatum(middle_right);
     cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
@@ -633,7 +635,7 @@ static void startMove(int d1, int d2, bool push = true) {
   nsteps = 0;
   sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
-  if (!nsubs) { phase = PASS; snprintf(msg, sizeof msg, "No legal move - tap to pass"); }
+  if (!nsubs) { phase = PASS; snprintf(msg, sizeof msg, "No legal move: tap the dice"); }
   else { phase = MOVE; snprintf(msg, sizeof msg, "Your move: %d-%d", d1, d2); }
 }
 
@@ -819,7 +821,11 @@ static void tap(int x, int y) {
   if (menuOpen) { menuTap(x, y); return; }
   if (y < 26 && x < 40) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
   if (phase == OVER) { newGame(); draw(); return; }
-  if (phase == PASS) { endHumanTurn(); draw(); return; }
+  if (phase == PASS) {  // no legal move: the dice hand over, as for DONE
+    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) { endHumanTurn(); draw(); }
+    else { snprintf(msg, sizeof msg, "No legal move: tap the dice"); draw(); }
+    return;
+  }
   if (phase == OFFER) {
     for (int i = 0; i < 2; i++) {
       if (x < buttonX(i) || x >= buttonX(i) + BW || y < OFFER_BY || y >= OFFER_BY + BH) continue;
@@ -998,7 +1004,7 @@ void loop() {
   if (netOk && !menuOpen && millis() - lastBlink > 450 && (phase == ROLL || phase == PASS || phase == OVER || phase == DONE)) {
     lastBlink = millis();
     blinkOn = !blinkOn;
-    if (phase == ROLL || phase == DONE) redrawRegion(TRX, MIDY - 12, W, MIDY + 40);
+    if (phase != OVER) redrawRegion(TRX, MIDY - 12, W, MIDY + 40);
     else redrawRegion(140, 0, 385, 22);
   } else if (phase == MOVE || phase == OFFER) blinkOn = true;
   // Resistive touch: the first samples of a press are unreliable, so collect
@@ -1027,6 +1033,18 @@ void loop() {
     if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
+    else if (ch == 'p') {
+      // Pass test: you on the bar against a closed board - every roll dances.
+      memset(&g, 0, sizeof g);
+      g.bar[0] = 1; g.pts[6] = 14;
+      for (int q = 19; q <= 24; q++) g.pts[q] = -2;
+      g.pts[1] = -3;
+      cubeVal = 1; cubeOwn = 0; nhist = 0; dice[0] = dice[1] = 0;
+      cpuMarks = hintMarks = false;
+      setEval();
+      phase = ROLL; snprintf(msg, sizeof msg, "Test: closed out");
+      draw();
+    }
     else if (ch == 'g' || ch == 'h') {
       // Cube tests on a race. 'g': CPU 60 pips vs your 75, your turn just
       // ended (the CPU decides whether to double). 'h': the reverse, you on roll.

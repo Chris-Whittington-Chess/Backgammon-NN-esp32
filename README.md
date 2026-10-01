@@ -44,8 +44,10 @@ pixels out), and a small white cross shows where each touch registered.
 **The CPU's turn**
 
 Its dice tumble, then its checkers slide one at a time; a hit blot flies to the bar. Afterwards
-orange marks show its move: rings where checkers left, dots where they landed. With no legal
-move, the status message pulses - tap to pass.
+orange marks show its move: rings where checkers left, dots where they landed.
+
+If your roll has no legal move, the dice grey out and PASS blinks under them: tap the dice to
+hand over, as with DONE.
 
 **Doubling cube** (money play)
 
