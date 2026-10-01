@@ -131,7 +131,7 @@ static uint16_t evalCol;
 static BgBoard kids[1024];
 
 static uint16_t C_FRAME, C_FELT, C_PTA, C_PTB, C_ME, C_MERIM, C_MEIN, C_OP, C_OPRIM, C_OPIN,
-    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU, C_HINT, C_OPHI;
+    C_BAR, C_TRAY, C_SEL, C_TEXT, C_DIM, C_GOOD, C_BAD, C_STATUS, C_CPU, C_HINT, C_OPHI, C_MEHI;
 
 static void calibrate();
 
@@ -202,7 +202,7 @@ static void checker(int cx, int cy, bool mine, int r = CR) {
   if (r >= 9) {
     cv.fillSmoothCircle(cx, cy, r - 4, mine ? C_MEIN : C_OPIN);
     cv.fillSmoothCircle(cx, cy, r - 5, mine ? C_ME : C_OP);
-    cv.fillSmoothCircle(cx - r / 3, cy - r / 3, 2, mine ? TFT_WHITE : C_OPHI);
+    cv.fillSmoothCircle(cx - r / 3, cy - r / 3, 2, mine ? C_MEHI : C_OPHI);
   }
 }
 static void rect(int x, int y, int w, int h, uint16_t c) { cv.fillRect(x, y - oy, w, h, c); }
@@ -951,7 +951,7 @@ void setup() {
   C_PTA = c(0xdc, 0xc9, 0xa0);  C_PTB = c(0xa3, 0x39, 0x2b);
   C_ME = c(0xf3, 0xee, 0xe0);   C_MERIM = c(0x8d, 0x86, 0x76); C_MEIN = c(0xd6, 0xcf, 0xbd);
   C_OP = c(0x26, 0x26, 0x26);   C_OPRIM = c(0xa0, 0xa0, 0xa0); C_OPIN = c(0x3c, 0x3c, 0x3c);
-  C_OPHI = c(0x6a, 0x6a, 0x6a);
+  C_OPHI = c(0x3e, 0x3e, 0x3e);  C_MEHI = c(0xfb, 0xf8, 0xf0);  // faint highlights
   C_BAR = c(0x4a, 0x2f, 0x18);  C_TRAY = c(0x17, 0x3f, 0x28);  C_SEL = c(0xff, 0xd2, 0x3c);
   C_TEXT = c(0xe8, 0xe2, 0xd2); C_DIM = c(0x8a, 0x8a, 0x8a);
   C_GOOD = c(0x7f, 0xe0, 0x8a); C_BAD = c(0xff, 0x8a, 0x7a); C_STATUS = c(0x10, 0x10, 0x10);
