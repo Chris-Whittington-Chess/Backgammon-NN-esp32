@@ -74,11 +74,19 @@ hand over, as with DONE.
 - The cube sits at the owner's end of the bar; wins are multiplied by it, a drop scores the
   current value.
 
-**Resigning**
+**Resigning and claiming a win**
 
-- Menu > Resign offers a single, gammon or backgammon. The CPU accepts if that's at least what
-  it expects from playing on (the net's equity with you on roll at the start of your turn) -
-  e.g. it refuses a single when it's likely to gammon you - and says what it expected.
+The CPU judges both by what playing on is worth: the net's cubeless equity, with you on roll at
+the start of your turn (or with the CPU on roll once your move is done, or you can't move).
+
+- **Resign** (menu): offer a single, gammon or backgammon. The CPU accepts anything worth at
+  least what it expects from playing on. If not, it says why ("It expects 1.82 by playing on")
+  and counter-offers the smallest resignation it would take - e.g. *Resign gammon (2)* - or you
+  can play on.
+- **Claim win** (menu): ask the CPU to concede a single, gammon or backgammon. It concedes if
+  you'd expect at least that much by playing on. If not, it says what you expect and offers the
+  most it would concede - e.g. *Take single (1)* - or, if you aren't clearly winning, simply
+  refuses.
 - A hopeless CPU (under 0.2% to win) resigns before its roll: a single, or a gammon /
   backgammon if you have real chances of one. Accept to take the points, or Refuse to play on
   (it won't offer again that game).
@@ -94,7 +102,7 @@ hand over, as with DONE.
 | Resign | Offer a single, gammon or backgammon (times the cube), or cancel |
 | Reset score | Score back to 0-0 |
 | Calibrate touch | Re-run the 4-corner touch calibration |
-| Close | Close the menu |
+| Claim win | Ask the CPU to concede a single, gammon or backgammon (times the cube), or cancel |
 
 When a game ends (played out, dropped or resigned) the status bar shows the result and score
 (you-CPU), and NEW GAME blinks in the tray: tap it to start the next game. Touch calibration also runs on first boot and is stored in NVS.

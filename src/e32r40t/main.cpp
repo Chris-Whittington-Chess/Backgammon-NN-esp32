@@ -102,7 +102,8 @@ static int clipX0 = 0, clipX1 = 480;  // columns being redrawn: skip shapes outs
 // DONE: all your dice played, waiting for you to tap the dice to hand over.
 // OFFER: the CPU has doubled you. RESIGN: you're choosing how much to resign.
 // RESOFFER: the CPU has offered to resign.
-enum Phase { ROLL, MOVE, PASS, OVER, OFFER, DONE, RESIGN, RESOFFER };
+// COUNTER: the CPU refused your resignation / claim and offered another deal.
+enum Phase { ROLL, MOVE, PASS, OVER, OFFER, DONE, RESIGN, RESOFFER, COUNTER };
 static BgBoard g, turnStart, cpuBefore;
 static Phase phase;
 static int dice[2];             // shown dice
@@ -200,9 +201,33 @@ static int stackY(bool top, int i) { return top ? FT + 14 + i * STEP : FB - 14 -
 static int pointCX(int p) { int c; bool t; pointGeom(p, c, t); return colX(c) + PW / 2; }
 
 // ---- drawing (screen coordinates; shifted by the band offset) ----
+// A board checker's face (everything inside the rim), anti-aliased once at
+// start-up: drawing a checker is then one smooth rim circle plus a keyed blit,
+// instead of five smooth circles every time.
+static LGFX_Sprite faceMe(&cv), faceOp(&cv);
+static const int FR = CR - 1;                  // face radius; sprites are 2*FR+1 square
+static const uint16_t FACE_KEY = TFT_MAGENTA;  // transparent outside the face
+static void makeFace(LGFX_Sprite& s, bool mine) {
+  s.setColorDepth(16);
+  s.createSprite(2 * FR + 1, 2 * FR + 1);
+  s.fillSprite(mine ? C_MERIM : C_OPRIM);  // the rim the face's AA edge blends into
+  s.fillSmoothCircle(FR, FR, FR, mine ? C_ME : C_OP);
+  s.fillSmoothCircle(FR, FR, CR - 4, mine ? C_MEIN : C_OPIN);
+  s.fillSmoothCircle(FR, FR, CR - 5, mine ? C_ME : C_OP);
+  s.fillSmoothCircle(FR - CR / 3, FR - CR / 3, 2, mine ? C_MEHI : C_OPHI);
+  for (int y = 0; y <= 2 * FR; y++)
+    for (int x = 0; x <= 2 * FR; x++)
+      if ((x - FR) * (x - FR) + (y - FR) * (y - FR) > (FR + 0.5f) * (FR + 0.5f)) s.drawPixel(x, y, FACE_KEY);
+}
+
 static void checker(int cx, int cy, bool mine, int r = CR) {
   cy -= oy;
   if (cy < -r || cy > BAND + r || cx + r < clipX0 || cx - r >= clipX1) return;
+  if (r == CR && faceMe.getBuffer()) {
+    cv.fillSmoothCircle(cx, cy, r, mine ? C_MERIM : C_OPRIM);
+    (mine ? faceMe : faceOp).pushSprite(cx - FR, cy - FR, FACE_KEY);
+    return;
+  }
   // Rim, face, a smooth inner ring, and a small highlight up-left.
   cv.fillSmoothCircle(cx, cy, r, mine ? C_MERIM : C_OPRIM);
   cv.fillSmoothCircle(cx, cy, r - 1, mine ? C_ME : C_OP);
@@ -214,13 +239,21 @@ static void checker(int cx, int cy, bool mine, int r = CR) {
 }
 static void rect(int x, int y, int w, int h, uint16_t c) { cv.fillRect(x, y - oy, w, h, c); }
 static void dot(int x, int y, int r, uint16_t c) { cv.fillSmoothCircle(x, y - oy, r, c); }
+// An anti-aliased line (screen coordinates), drawn only for the slice inside
+// this band - a full-length smooth line costs its whole bounding box per band.
+static void edgeAA(int xa, int ya, int xb, int yb, uint16_t col) {
+  int y0 = max(min(ya, yb), oy - 2), y1 = min(max(ya, yb), oy + BAND + 2);
+  if (y0 > y1) return;
+  auto xAt = [&](int y) { return (int)lroundf(xa + (xb - xa) * float(y - ya) / float(yb - ya)); };
+  cv.drawSmoothLine(xAt(y0), y0 - oy, xAt(y1), y1 - oy, col);
+}
 static void tri(int x0, bool top, uint16_t col) {
   // Filled, then the two long edges re-drawn anti-aliased so they don't stair-step.
   if (x0 + PW <= clipX0 || x0 >= clipX1) return;
-  int by = (top ? FT : FB - 1) - oy, ty = (top ? FT + PH : FB - PH) - oy, tx = x0 + PW / 2;
-  cv.fillTriangle(x0, by, x0 + PW - 1, by, tx, ty, col);
-  cv.drawSmoothLine(x0, by, tx, ty, col);
-  cv.drawSmoothLine(x0 + PW - 1, by, tx, ty, col);
+  int by = top ? FT : FB - 1, ty = top ? FT + PH : FB - PH, tx = x0 + PW / 2;
+  cv.fillTriangle(x0, by - oy, x0 + PW - 1, by - oy, tx, ty - oy, col);
+  edgeAA(x0, by, tx, ty, col);
+  edgeAA(x0 + PW - 1, by, tx, ty, col);
 }
 static void die(int x, int y, int v, bool cpu, bool used) {
   y -= oy;
@@ -275,7 +308,7 @@ static const int MX = 90, MY = 22, MW = 300, MH = 258, BW = 136, BH = 46;
 // Tapping outside the panel (or the menu icon) also closes it.
 static const int NMENU = 8;
 static const char* const MENU[NMENU] = {"Undo step", "New game", "Undo move", "Hint",
-                                        "Resign", "Reset score", "Calibrate touch", "Close"};
+                                        "Resign", "Reset score", "Calibrate touch", "Claim win"};
 static bool canTakeBack() {
   if (phase == DONE) return true;
   if (phase == MOVE) return memcmp(&g, &turnStart, sizeof g) || nhist >= 2;
@@ -286,7 +319,7 @@ static bool menuEnabled(int i) {
   if (i == 0) return (phase == MOVE || phase == DONE) && nsteps > 0;
   if (i == 2) return canTakeBack();
   if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
-  if (i == 4) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
+  if (i == 4 || i == 7) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
   return true;
 }
 static int buttonX(int i) { return MX + 10 + (i % 2) * (BW + 8); }
@@ -299,7 +332,7 @@ static int dlgN;
 static const int DLG_Y = 70;
 static int dlgBY(int i) { return DLG_Y + 74 + (i / 2) * (BH + 8); }
 static int dlgH() { return 74 + (dlgN / 2) * (BH + 8) + 6; }
-static bool dialogUp() { return phase == OFFER || phase == RESIGN || phase == RESOFFER; }
+static bool dialogUp() { return phase == OFFER || phase == RESIGN || phase == RESOFFER || phase == COUNTER; }
 static void setDialog(const char* title, const char* const* lbl, int n) {
   snprintf(dlgTitle, sizeof dlgTitle, "%s", title);
   for (int i = 0; i < n; i++) snprintf(dlgLbl[i], sizeof dlgLbl[i], "%s", lbl[i]);
@@ -315,7 +348,7 @@ static void drawDialog() {
   cv.fillRoundRect(MX, DLG_Y - oy, MW, dlgH(), 10, C_STATUS);
   cv.drawRoundRect(MX, DLG_Y - oy, MW, dlgH(), 10, C_DIM);
   cv.setTextDatum(middle_center);
-  cv.setFont(&F_B21);
+  cv.setFont(strlen(dlgTitle) > 22 ? &F_B16 : &F_B21);  // long titles must fit the panel
   cv.setTextColor(C_TEXT);
   text(dlgTitle, MX + MW / 2, DLG_Y + 22);
   cv.setFont(&F_S16);
@@ -495,10 +528,12 @@ static void drawBand() {
 }
 
 static void draw() {
+  uint32_t t0 = millis();
   for (oy = 0; oy < H; oy += BAND) {
     drawBand();
     cv.pushSprite(0, oy);
   }
+  Serial.printf("full draw %u ms\n", millis() - t0);
 }
 
 // ---- animation ----
@@ -828,35 +863,73 @@ static void hint() {
   snprintf(msg, sizeof msg, "Hint shown (%+.2f)", s);
 }
 
-// Menu > Resign: choose a single / gammon / backgammon (or cancel).
-static void openResign() {
+// ---- resigning and claiming a win ----
+static const char* const LEVEL[4] = {"", "single", "gammon", "backgammon"};
+static const char* const LEVEL_C[4] = {"", "Single", "Gammon", "Backgammon"};
+static bool claiming;      // the open dialog / counter is a claim (else a resignation)
+static int counterLevel;   // what the CPU would settle for instead
+
+static void pointsLabel(char* out, size_t n, const char* head, int level) {
+  int pts = level * cubeVal;
+  snprintf(out, n, "%s\n%d point%s", head, pts, pts > 1 ? "s" : "");
+}
+
+// Menu > Resign / Claim win: choose a single / gammon / backgammon (or cancel).
+static void openSettle(bool claim) {
   resumePhase = phase;
+  claiming = claim;
   sel = -1; npaths = 0; hintMarks = false;
   char l[4][20];
-  const char* nm[3] = {"Single", "Gammon", "Backgammon"};
-  for (int k = 0; k < 3; k++) {
-    int pts = (k + 1) * cubeVal;
-    snprintf(l[k], sizeof l[k], "%s\n%d point%s", nm[k], pts, pts > 1 ? "s" : "");
-  }
+  for (int k = 1; k <= 3; k++) pointsLabel(l[k - 1], sizeof l[k - 1], LEVEL_C[k], k);
   snprintf(l[3], sizeof l[3], "Cancel");
   const char* lp[4] = {l[0], l[1], l[2], l[3]};
-  setDialog("Resign how much?", lp, 4);
+  setDialog(claim ? "Claim how much?" : "Resign how much?", lp, 4);
   snprintf(offerTxt, sizeof offerTxt, "The CPU may refuse");
-  snprintf(msg, sizeof msg, "Resign?");
+  snprintf(msg, sizeof msg, claim ? "Claim a win?" : "Resign?");
   phase = RESIGN;
 }
 
-// The CPU accepts a resignation worth at least what it expects from playing
-// on: its cubeless equity (per cube) with you on roll at the start of your turn.
-static void resignOffer(int level) {
+// Your cubeless equity (per cube) from playing on, as the CPU judges it: with
+// you on roll at the start of your turn, or - once your move is done or you
+// can't move - with the CPU on roll in the position now.
+static float yourPlayOnEquity() {
   float p[6];
-  bool started = resumePhase == MOVE || resumePhase == DONE;
-  net.eval(started ? turnStart : g, p);
-  float cpuExp = -bg_equity(p);
-  Serial.printf("you resign %d: cpu expects %.3f -> %s\n", level, cpuExp, level >= cpuExp - 0.01f ? "accepts" : "refuses");
-  if (level >= cpuExp - 0.01f) { gameOver(level, false, "you resigned"); return; }
-  phase = (Phase)resumePhase;
-  snprintf(msg, sizeof msg, "CPU refuses (expects %.2f)", cpuExp);
+  if (resumePhase == DONE || resumePhase == PASS) { net.eval(bg_swap(g), p); return -bg_equity(p); }
+  net.eval(resumePhase == MOVE ? turnStart : g, p);
+  return bg_equity(p);
+}
+
+// Resign: the CPU accepts anything worth at least what it expects from playing
+// on. Claim: it concedes anything no worse than what it expects to lose. Either
+// way a refusal says why, and offers the deal it would take when there is one.
+static void settleOffer(int level) {
+  const float TOL = 0.01f;
+  float you = yourPlayOnEquity();
+  if (!claiming) {
+    float cpuExp = -you;
+    Serial.printf("you resign %d: cpu expects %.3f\n", level, cpuExp);
+    if (level >= cpuExp - TOL) { gameOver(level, false, "you resigned"); return; }
+    counterLevel = cpuExp - TOL <= 2 ? 2 : 3;  // the smallest it would take
+    snprintf(offerTxt, sizeof offerTxt, "It expects %.2f by playing on", cpuExp);
+  } else {
+    Serial.printf("you claim %d: you expect %.3f\n", level, you);
+    if (level <= you + TOL) { gameOver(level, true, "CPU conceded"); return; }
+    counterLevel = you + TOL >= 2 ? 2 : you + TOL >= 1 ? 1 : 0;  // the most it would give
+    if (!counterLevel) {
+      phase = (Phase)resumePhase;
+      snprintf(msg, sizeof msg, "CPU refuses: you expect only %.2f", you);
+      return;
+    }
+    snprintf(offerTxt, sizeof offerTxt, "You expect %.2f by playing on", you);
+  }
+  char t[40], l[2][20];
+  snprintf(t, sizeof t, "CPU refuses a %s", LEVEL[level]);
+  snprintf(l[0], sizeof l[0], "%s\n%s (%d)", claiming ? "Take" : "Resign", LEVEL[counterLevel], counterLevel * cubeVal);
+  snprintf(l[1], sizeof l[1], "Play on");
+  const char* lp[2] = {l[0], l[1]};
+  setDialog(t, lp, 2);
+  snprintf(msg, sizeof msg, "CPU counter-offers");
+  phase = COUNTER;
 }
 
 static void menuTap(int x, int y) {
@@ -872,10 +945,10 @@ static void menuTap(int x, int y) {
     case 1: newGame(); break;
     case 2: takeBack(); break;
     case 3: hint(); break;
-    case 4: openResign(); break;
+    case 4: openSettle(false); break;
     case 5: scoreYou = scoreCpu = 0; snprintf(msg, sizeof msg, "Score reset"); break;
     case 6: calibrate(); break;
-    case 7: break;  // Close
+    case 7: openSettle(true); break;
   }
   draw();
 }
@@ -944,7 +1017,14 @@ static void tap(int x, int y) {
   if (phase == RESIGN) {
     int i = dlgHit(x, y);
     if (i == 3) { phase = (Phase)resumePhase; snprintf(msg, sizeof msg, "Play on"); }
-    else if (i >= 0) resignOffer(i + 1);
+    else if (i >= 0) settleOffer(i + 1);
+    if (i >= 0) draw();
+    return;
+  }
+  if (phase == COUNTER) {  // the CPU's counter-offer: take it, or play on
+    int i = dlgHit(x, y);
+    if (i == 0) gameOver(counterLevel, claiming, claiming ? "CPU conceded" : "you resigned");
+    else if (i == 1) { phase = (Phase)resumePhase; snprintf(msg, sizeof msg, "Play on"); }
     if (i >= 0) draw();
     return;
   }
@@ -1100,6 +1180,8 @@ void setup() {
   C_TEXT = c(0xe8, 0xe2, 0xd2); C_DIM = c(0x8a, 0x8a, 0x8a);
   C_GOOD = c(0x7f, 0xe0, 0x8a); C_BAD = c(0xff, 0x8a, 0x7a); C_STATUS = c(0x10, 0x10, 0x10);
   C_CPU = c(0xff, 0x9a, 0x3c);    C_HINT = c(0x4c, 0xd6, 0xf0);
+  makeFace(faceMe, true);
+  makeFace(faceOp, false);
   randomSeed(esp_random());
   prefs.begin("bg", false);
   uint16_t cal[8];
