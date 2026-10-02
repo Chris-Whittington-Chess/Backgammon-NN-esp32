@@ -432,7 +432,7 @@ static void drawBand() {
   for (int i = 0; i < g.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
   for (int i = 0; i < g.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
   // dice
-  if (dice[0] && phase != OVER) {
+  if (dice[0]) {  // the last dice stay on show until new ones are rolled
     bool dbl = dice[0] == dice[1];
     bool used0 = false, used1 = false;
     if ((phase == MOVE || phase == DONE || phase == PASS) && !cpuDice && (!dbl || phase == PASS)) {
@@ -450,8 +450,9 @@ static void drawBand() {
   }
   if (phase == OVER && blinkOn) {  // the game is over: the tray starts the next
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
-    text("NEW", TRX + TRW / 2, MIDY - 9);
-    text("GAME", TRX + TRW / 2, MIDY + 9);
+    int ny = dice[0] ? MIDY + 24 : MIDY - 9;  // under the dice, where ROLL goes
+    text("NEW", TRX + TRW / 2, ny);
+    text("GAME", TRX + TRW / 2, ny + 18);
   }
   if ((phase == DONE || phase == PASS) && blinkOn) {  // hand the dice over
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
@@ -700,7 +701,6 @@ static void newGame() {
   nhist = 0;
   int a, b;
   do { a = random(1, 7); b = random(1, 7); } while (a == b);
-  dice[0] = dice[1] = 0;
   if (a > b) {
     snprintf(msg, sizeof msg, "You %d, CPU %d: you start", a, b);
     setEval();
@@ -1120,7 +1120,7 @@ void loop() {
   if (netOk && !menuOpen && millis() - lastBlink > 450 && (phase == ROLL || phase == PASS || phase == OVER || phase == DONE)) {
     lastBlink = millis();
     blinkOn = !blinkOn;
-    redrawRegion(TRX, MIDY - 20, W, MIDY + 40);
+    redrawRegion(TRX, MIDY - 20, W, MIDY + 54);
   } else if (phase == MOVE || phase == OFFER) blinkOn = true;
   // Resistive touch: the first samples of a press are unreliable, so collect
   // the whole press and act on release at the median position.
@@ -1219,7 +1219,7 @@ void loop() {
           cpuTurn(random(1, 7), random(1, 7));
         }
       }
-      nhist = 0; hintMarks = false; dice[0] = dice[1] = 0;
+      nhist = 0; hintMarks = false;
       draw();
     }
     else if (ch == 'd') dumpFrame();
