@@ -1,8 +1,9 @@
-// Backgammon vs the Backgammon-NN net (0-ply) on the 4.0" ESP32-32E display
-// (lcdwiki E32R40T, sold as Hosyond): ESP32-D0WD-V3, no PSRAM, ST7796S 480x320
-// SPI, XPT2046 resistive touch on the same bus. Pins from lcdwiki.
+// Backgammon vs the Backgammon-NN net (0-ply) on an ESP32 touch-screen board.
+// The board (panel, touch, pins, layout size) comes from include/board.h; the
+// layout below is computed from its W x H. Reference board: the 4.0" ESP32-32E
+// display (480x320, no PSRAM).
 //
-// No PSRAM: the frame is rendered in 480x20 bands through one small sprite,
+// No PSRAM: the frame is rendered in W x 20 bands through one small sprite,
 // and the net is read from flash except its dense layer 2 (four 32 KB chunks
 // in SRAM). Rules/movegen: common/bg.cpp (port of bgcore moves.rs).
 //
@@ -13,8 +14,8 @@
 // Touch calibration runs on first boot (or serial 'k'), saved in NVS.
 // Serial (921600): 'v' verify movegen + move choice against bgcore and time
 // it, 'n' new game, 't X Y' simulated tap, 'k' recalibrate, 'd' dump frame
-// ("FRAME\n" + 480*320 LE RGB565).
-#include <LovyanGFX.hpp>
+// ("FRAME\n" + W*H LE RGB565).
+#include "board.h"
 #include <Preferences.h>
 #include <algorithm>
 #include "../common/bg.h"
@@ -22,15 +23,21 @@
 extern const uint8_t net_bin[] asm("_binary_data_net_bin_start");
 extern const uint8_t movetests_bin[] asm("_binary_data_movetests_bin_start");
 
-// Anti-aliased DejaVu Sans (tools/make_fonts.py), read from flash.
-#define FONT(n) extern const uint8_t n##_s[] asm("_binary_data_fonts_" #n "_vlw_start"); \
-                extern const uint8_t n##_e[] asm("_binary_data_fonts_" #n "_vlw_end");
-FONT(sans16) FONT(bold16) FONT(sans21) FONT(bold21)
-static lgfx::VLWfont F_S16, F_B16, F_S21, F_B21;
+// Anti-aliased DejaVu Sans (tools/make_fonts.py), read from flash, at the
+// board's two sizes: F_S / F_B small regular / bold, F_L / F_LB large.
+#define STR2(x) #x
+#define STR(x) STR2(x)
+#define CAT3(a, b, c) a##b##c
+#define FONT(var, kind, px)                                                                   \
+  extern const uint8_t var##_s[] asm(STR(CAT3(_binary_data_fonts_, kind, px)) "_vlw_start"); \
+  extern const uint8_t var##_e[] asm(STR(CAT3(_binary_data_fonts_, kind, px)) "_vlw_end");
+#define FONT_X(var, kind, px) FONT(var, kind, px)
+FONT_X(fs, sans, FONT_PX_S) FONT_X(fb, bold, FONT_PX_S) FONT_X(fl, sans, FONT_PX_L) FONT_X(flb, bold, FONT_PX_L)
+static lgfx::VLWfont F_S16, F_B16, F_S21, F_B21;  // small / small bold / large / large bold
 static lgfx::PointerWrapper fontData[4];
 static void loadFonts() {
-  const uint8_t* s[4] = {sans16_s, bold16_s, sans21_s, bold21_s};
-  const uint8_t* e[4] = {sans16_e, bold16_e, sans21_e, bold21_e};
+  const uint8_t* s[4] = {fs_s, fb_s, fl_s, flb_s};
+  const uint8_t* e[4] = {fs_e, fb_e, fl_e, flb_e};
   lgfx::VLWfont* f[4] = {&F_S16, &F_B16, &F_S21, &F_B21};
   for (int i = 0; i < 4; i++) {
     fontData[i].set(s[i], e[i] - s[i]);
@@ -38,65 +45,14 @@ static void loadFonts() {
   }
 }
 
-class LGFX : public lgfx::LGFX_Device {
-  lgfx::Panel_ST7796 panel;
-  lgfx::Bus_SPI bus;
-  lgfx::Light_PWM light;
-  lgfx::Touch_XPT2046 touch;
-
- public:
-  LGFX() {
-    {
-      auto c = bus.config();
-      c.spi_host = HSPI_HOST;
-      c.spi_mode = 0;
-      c.freq_write = 40000000;
-      c.freq_read = 16000000;
-      c.pin_sclk = 14; c.pin_mosi = 13; c.pin_miso = 12; c.pin_dc = 2;
-      c.use_lock = true;
-      c.dma_channel = SPI_DMA_CH_AUTO;
-      bus.config(c);
-      panel.setBus(&bus);
-    }
-    {
-      auto c = panel.config();
-      c.pin_cs = 15; c.pin_rst = -1; c.pin_busy = -1;
-      c.panel_width = 320; c.panel_height = 480;
-      c.readable = true;
-      c.invert = false;
-      c.rgb_order = false;
-      c.bus_shared = true;
-      panel.config(c);
-    }
-    {
-      auto c = light.config();
-      c.pin_bl = 27; c.invert = false; c.freq = 44100; c.pwm_channel = 7;
-      light.config(c);
-      panel.setLight(&light);
-    }
-    {
-      auto c = touch.config();
-      c.x_min = 300; c.x_max = 3900; c.y_min = 200; c.y_max = 3800;
-      c.pin_int = 36;
-      c.bus_shared = true;
-      c.spi_host = HSPI_HOST;
-      c.freq = 1000000;
-      c.pin_sclk = 14; c.pin_mosi = 13; c.pin_miso = 12; c.pin_cs = 33;
-      touch.config(c);
-      panel.setTouch(&touch);
-    }
-    setPanel(&panel);
-  }
-};
-
 static LGFX lcd;
 static LGFX_Sprite cv(&lcd);
 static Preferences prefs;
 static BgNet net;
 static bool netOk;
-static const int W = 480, H = 320, BAND = 20;  // 19 KB sprite: the heap is fragmented
+static const int BAND = 20;  // W x 20 x 2 bytes of sprite (19 KB at 480): the heap is fragmented
 static int oy = 0;  // y offset of the band being rendered
-static int clipX0 = 0, clipX1 = 480;  // columns being redrawn: skip shapes outside them
+static int clipX0 = 0, clipX1 = W;  // columns being redrawn: skip shapes outside them
 
 // ---- game state (board always from the human's side: + = you) ----
 // DONE: all your dice played, waiting for you to tap the dice to hand over.
@@ -183,21 +139,37 @@ static void computePaths() {
   reachFrom(g, rem, nrem, sel, start);
 }
 
-// ---- geometry (480x320) ----
-static const int PW = 32;                  // point width
-static const int LX = 6, RFX = 228;        // left / right field x
-static const int BARX = 198, BARW = 30;
-static const int TRX = 424, TRW = 50;      // tray
-static const int FT = 25, FB = 316;        // field top / bottom
-static const int PH = 128;                 // point (triangle) height
-static const int CR = 13, STEP = 27;       // checker radius, stack step
-static const int MIDY = 171;               // dice row
+// ---- geometry: designed at 480x320 and scaled to the board's W x H ----
+// Horizontal sizes scale with W, vertical with H, and round things (checkers,
+// dice, text, menus) with the smaller of the two. At 480x320 every value below
+// is the original hand-tuned one.
+static constexpr float LSX = W / 480.0f, LSY = H / 320.0f, LSS = LSX < LSY ? LSX : LSY;
+static constexpr int sx(float v) { return int(v * LSX + 0.5f); }
+static constexpr int sy(float v) { return int(v * LSY + 0.5f); }
+static constexpr int ss(float v) { return int(v * LSS + 0.5f) > 0 ? int(v * LSS + 0.5f) : 1; }
+static const int SB = sy(22);                      // status bar height
+static const int PW = sx(32);                      // point width
+static const int LX = sx(6);                       // left field x
+static const int BARX = LX + 6 * PW, BARW = sx(30);
+static const int RFX = BARX + BARW;                // right field x
+static const int TRX = RFX + 6 * PW + sx(4);       // tray
+static const int TRW = W - TRX - sx(6);
+static const int FT = SB + sy(3), FB = H - sy(4);  // field top / bottom
+static const int CR = ss(13), STEP = 2 * CR + 1;   // checker radius, stack step
+static const int PH = 5 * STEP - ss(7);            // point (triangle) height
+static const int MIDY = (FT + FB + 1) / 2;         // dice row / board middle
+static const int DS = ss(22);                      // die size
+static const int OFFS = ss(8);                     // borne-off slab pitch
+static const int BAROFF = ss(40);                  // bar checkers' distance from MIDY
+static const int TAP_H = ss(30), TAP_D = ss(40);   // dice / tray tap zone: MIDY - TAP_H .. MIDY + TAP_D
+static_assert(PW >= 2 * CR + 1, "checkers must fit on a point");
+static_assert(2 * (5 * STEP) <= FB - FT + STEP, "five checkers per half must fit");
 
 static int colX(int c) { return c < 6 ? LX + c * PW : RFX + (c - 6) * PW; }
 static void pointGeom(int p, int& c, bool& top) {
   if (p >= 13) { c = p - 13; top = true; } else { c = 12 - p; top = false; }
 }
-static int stackY(bool top, int i) { return top ? FT + 14 + i * STEP : FB - 14 - i * STEP; }
+static int stackY(bool top, int i) { return top ? FT + CR + 1 + i * STEP : FB - CR - 1 - i * STEP; }
 static int pointCX(int p) { int c; bool t; pointGeom(p, c, t); return colX(c) + PW / 2; }
 
 // ---- drawing (screen coordinates; shifted by the band offset) ----
@@ -231,7 +203,7 @@ static void checker(int cx, int cy, bool mine, int r = CR) {
   // Rim, face, a smooth inner ring, and a small highlight up-left.
   cv.fillSmoothCircle(cx, cy, r, mine ? C_MERIM : C_OPRIM);
   cv.fillSmoothCircle(cx, cy, r - 1, mine ? C_ME : C_OP);
-  if (r >= 9) {
+  if (r >= ss(9)) {
     cv.fillSmoothCircle(cx, cy, r - 4, mine ? C_MEIN : C_OPIN);
     cv.fillSmoothCircle(cx, cy, r - 5, mine ? C_ME : C_OP);
     cv.fillSmoothCircle(cx - r / 3, cy - r / 3, 2, mine ? C_MEHI : C_OPHI);
@@ -259,12 +231,14 @@ static void die(int x, int y, int v, bool cpu, bool used) {
   y -= oy;
   uint16_t body = cpu ? C_OP : 0xF79D, pip = cpu ? C_ME : TFT_BLACK;
   if (used) { body = C_DIM; pip = 0x4208; }
-  if (cpu) { cv.fillSmoothRoundRect(x, y, 22, 22, 4, C_OPRIM); cv.fillSmoothRoundRect(x + 1, y + 1, 20, 20, 3, body); }
-  else cv.fillSmoothRoundRect(x, y, 22, 22, 4, body);
+  if (cpu) { cv.fillSmoothRoundRect(x, y, DS, DS, ss(4), C_OPRIM); cv.fillSmoothRoundRect(x + 1, y + 1, DS - 2, DS - 2, ss(3), body); }
+  else cv.fillSmoothRoundRect(x, y, DS, DS, ss(4), body);
+  // Pip centres on a 22-unit die, scaled to DS.
   static const uint8_t P[7][6][2] = {{}, {{11,11}}, {{6,6},{16,16}}, {{6,6},{11,11},{16,16}},
     {{6,6},{16,6},{6,16},{16,16}}, {{6,6},{16,6},{11,11},{6,16},{16,16}},
     {{6,6},{16,6},{6,11},{16,11},{6,16},{16,16}}};
-  for (int i = 0; i < v; i++) cv.fillSmoothCircle(x + P[v][i][0], y + P[v][i][1], 2, pip);
+  for (int i = 0; i < v; i++)
+    cv.fillSmoothCircle(x + P[v][i][0] * DS / 22, y + P[v][i][1] * DS / 22, ss(2), pip);
 }
 static void text(const char* s, int x, int y) { cv.drawString(s, x, y - oy); }
 static void number(int n, int x, int y) { cv.drawNumber(n, x, y - oy); }
@@ -280,7 +254,7 @@ static void targetXY(int t, int& x, int& y) {
     int c; bool top; pointGeom(t, c, top);
     int n = g.pts[t] > 0 ? min((int)g.pts[t], 4) : 0;
     x = colX(c) + PW / 2; y = stackY(top, n);
-  } else { x = TRX + TRW / 2; y = FB - 8 - g.off[0] * 8 - 10; }
+  } else { x = TRX + TRW / 2; y = FB - OFFS - g.off[0] * OFFS - ss(10); }
 }
 
 static void drawMarks(const BgBoard& a, const BgBoard& b, bool mine, uint16_t col) {
@@ -292,19 +266,21 @@ static void drawMarks(const BgBoard& a, const BgBoard& b, bool mine, uint16_t co
     // the leaving checker vacated.
     int c; bool top; pointGeom(p, c, top);
     int x = colX(c) + PW / 2;
-    if (now > was) dot(x, stackY(top, min(now, 5) - 1), 5, col);
+    if (now > was) dot(x, stackY(top, min(now, 5) - 1), ss(5), col);
     else {
       int y = stackY(top, min(now, 4)) - oy;
-      cv.drawCircle(x, y, 7, col); cv.drawCircle(x, y, 6, col);
+      cv.drawCircle(x, y, ss(7), col); cv.drawCircle(x, y, ss(6), col);
     }
   }
   int s = mine ? 0 : 1;
-  if (b.off[s] > a.off[s]) dot(TRX + TRW / 2, mine ? FB - 8 - b.off[s] * 8 - 10 : FT + 8 + b.off[s] * 8 + 10, 5, col);
-  if (b.bar[s] < a.bar[s]) { int y = mine ? MIDY + 40 : MIDY - 40; cv.drawCircle(BARX + BARW / 2, y - oy, 5, col); }
+  if (b.off[s] > a.off[s])
+    dot(TRX + TRW / 2, mine ? FB - OFFS - b.off[s] * OFFS - ss(10) : FT + OFFS + b.off[s] * OFFS + ss(10), ss(5), col);
+  if (b.bar[s] < a.bar[s]) { int y = mine ? MIDY + BAROFF : MIDY - BAROFF; cv.drawCircle(BARX + BARW / 2, y - oy, ss(5), col); }
 }
 
 // ---- menu (2 x 4 buttons over the board) ----
-static const int MX = 90, MY = 22, MW = 300, MH = 258, BW = 136, BH = 46;
+static const int MW = ss(300), MX = (W - MW) / 2, MY = SB, MH = ss(258), BW = ss(136), BH = ss(46);
+static const int BGAP = ss(8);  // between buttons
 // Tapping outside the panel (or the menu icon) also closes it.
 static const int NMENU = 8;
 static const char* const MENU[NMENU] = {"Undo step", "New game", "Undo move", "Hint",
@@ -322,16 +298,16 @@ static bool menuEnabled(int i) {
   if (i == 4 || i == 7) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
   return true;
 }
-static int buttonX(int i) { return MX + 10 + (i % 2) * (BW + 8); }
+static int buttonX(int i) { return MX + ss(10) + (i % 2) * (BW + BGAP); }
 
 // A question over the board (the CPU's double, choosing how much to resign,
 // the CPU's resignation): a title, a line of detail and 2 or 4 buttons.
 static char dlgTitle[40];
 static char dlgLbl[4][20];
 static int dlgN;
-static const int DLG_Y = 70;
-static int dlgBY(int i) { return DLG_Y + 74 + (i / 2) * (BH + 8); }
-static int dlgH() { return 74 + (dlgN / 2) * (BH + 8) + 6; }
+static const int DLG_Y = sy(70);
+static int dlgBY(int i) { return DLG_Y + ss(74) + (i / 2) * (BH + BGAP); }
+static int dlgH() { return ss(74) + (dlgN / 2) * (BH + BGAP) + ss(6); }
 static bool dialogUp() { return phase == OFFER || phase == RESIGN || phase == RESOFFER || phase == COUNTER; }
 static void setDialog(const char* title, const char* const* lbl, int n) {
   snprintf(dlgTitle, sizeof dlgTitle, "%s", title);
@@ -345,26 +321,26 @@ static int dlgHit(int x, int y) {
 }
 static void drawDialog() {
   if (DLG_Y + dlgH() < oy || DLG_Y > oy + BAND) return;
-  cv.fillRoundRect(MX, DLG_Y - oy, MW, dlgH(), 10, C_STATUS);
-  cv.drawRoundRect(MX, DLG_Y - oy, MW, dlgH(), 10, C_DIM);
+  cv.fillRoundRect(MX, DLG_Y - oy, MW, dlgH(), ss(10), C_STATUS);
+  cv.drawRoundRect(MX, DLG_Y - oy, MW, dlgH(), ss(10), C_DIM);
   cv.setTextDatum(middle_center);
   cv.setFont(strlen(dlgTitle) > 22 ? &F_B16 : &F_B21);  // long titles must fit the panel
   cv.setTextColor(C_TEXT);
-  text(dlgTitle, MX + MW / 2, DLG_Y + 22);
+  text(dlgTitle, MX + MW / 2, DLG_Y + ss(22));
   cv.setFont(&F_S16);
   cv.setTextColor(C_DIM);
-  text(offerTxt, MX + MW / 2, DLG_Y + 50);
+  text(offerTxt, MX + MW / 2, DLG_Y + ss(50));
   for (int i = 0; i < dlgN; i++) {
-    cv.fillRoundRect(buttonX(i), dlgBY(i) - oy, BW, BH, 8, C_FELT);
-    cv.drawRoundRect(buttonX(i), dlgBY(i) - oy, BW, BH, 8, C_SEL);
+    cv.fillRoundRect(buttonX(i), dlgBY(i) - oy, BW, BH, ss(8), C_FELT);
+    cv.drawRoundRect(buttonX(i), dlgBY(i) - oy, BW, BH, ss(8), C_SEL);
     cv.setTextColor(C_TEXT);
     char* nl = strchr(dlgLbl[i], '\n');  // two-line label: name, then detail
     if (nl) {
       *nl = 0;
       cv.setFont(&F_S16);
-      text(dlgLbl[i], buttonX(i) + BW / 2, dlgBY(i) + BH / 2 - 9);
+      text(dlgLbl[i], buttonX(i) + BW / 2, dlgBY(i) + BH / 2 - ss(9));
       cv.setTextColor(C_DIM);
-      text(nl + 1, buttonX(i) + BW / 2, dlgBY(i) + BH / 2 + 10);
+      text(nl + 1, buttonX(i) + BW / 2, dlgBY(i) + BH / 2 + ss(10));
       *nl = '\n';
     } else {
       cv.setFont(strlen(dlgLbl[i]) > 9 ? &F_S16 : &F_S21);
@@ -374,50 +350,51 @@ static void drawDialog() {
 }
 
 // The cube in the bar: centred, or at the owner's end. Yellow rim = you may double.
-static const int CUBE_S = 26;
-static int cubeY() { return cubeOwn > 0 ? FB - CUBE_S - 4 : cubeOwn < 0 ? FT + 4 : MIDY - CUBE_S / 2; }
+static const int CUBE_S = ss(26);
+static int cubeY() { return cubeOwn > 0 ? FB - CUBE_S - ss(4) : cubeOwn < 0 ? FT + ss(4) : MIDY - CUBE_S / 2; }
 static void drawCube() {
   int x = BARX + (BARW - CUBE_S) / 2, y = cubeY();
-  if (y + CUBE_S + 3 < oy || y - 3 > oy + BAND || x + CUBE_S + 3 < clipX0 || x - 3 >= clipX1) return;
+  const int RIM = ss(3);
+  if (y + CUBE_S + RIM < oy || y - RIM > oy + BAND || x + CUBE_S + RIM < clipX0 || x - RIM >= clipX1) return;
   bool may = phase == ROLL && cubeOwn >= 0 && cubeVal < 64;
-  if (may) cv.fillSmoothRoundRect(x - 3, y - 3 - oy, CUBE_S + 6, CUBE_S + 6, 7, C_SEL);
-  cv.fillSmoothRoundRect(x, y - oy, CUBE_S, CUBE_S, 5, 0xEF3A);
+  if (may) cv.fillSmoothRoundRect(x - RIM, y - RIM - oy, CUBE_S + 2 * RIM, CUBE_S + 2 * RIM, ss(7), C_SEL);
+  cv.fillSmoothRoundRect(x, y - oy, CUBE_S, CUBE_S, ss(5), 0xEF3A);
   cv.setFont(&F_B16);
   cv.setTextDatum(middle_center);
   cv.setTextColor(TFT_BLACK);
   number(cubeVal == 1 ? 64 : cubeVal, x + CUBE_S / 2, y + CUBE_S / 2 + 1);
 }
-static int buttonY(int i) { return MY + 36 + (i / 2) * (BH + 8); }
+static int buttonY(int i) { return MY + ss(36) + (i / 2) * (BH + BGAP); }
 
 static void drawMenu() {
   if (MY + MH < oy || MY > oy + BAND) return;
-  cv.fillRoundRect(MX, MY - oy, MW, MH, 10, C_STATUS);
-  cv.drawRoundRect(MX, MY - oy, MW, MH, 10, C_DIM);
+  cv.fillRoundRect(MX, MY - oy, MW, MH, ss(10), C_STATUS);
+  cv.drawRoundRect(MX, MY - oy, MW, MH, ss(10), C_DIM);
   cv.setFont(&F_B21);
   cv.setTextDatum(middle_center);
   cv.setTextColor(C_TEXT);
-  text("Menu", MX + MW / 2, MY + 18);
+  text("Menu", MX + MW / 2, MY + ss(18));
   cv.setFont(&F_S21);
   for (int i = 0; i < NMENU; i++) {
     bool on = menuEnabled(i);
-    cv.fillRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_FELT : C_BAR);
-    cv.drawRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, 8, on ? C_SEL : C_DIM);
+    cv.fillRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, ss(8), on ? C_FELT : C_BAR);
+    cv.drawRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, ss(8), on ? C_SEL : C_DIM);
     cv.setTextColor(on ? C_TEXT : C_DIM);
     if (i == 6) {  // two lines
       cv.setFont(&F_S16);
-      text("Calibrate", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - 9);
-      text("touch", buttonX(i) + BW / 2, buttonY(i) + BH / 2 + 10);
+      text("Calibrate", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - ss(9));
+      text("touch", buttonX(i) + BW / 2, buttonY(i) + BH / 2 + ss(10));
       cv.setFont(&F_S21);
     } else text(MENU[i], buttonX(i) + BW / 2, buttonY(i) + BH / 2);
   }
 }
 
 static void drawBand() {
-  rect(0, 0, W, 22, C_STATUS);
-  rect(0, 22, W, H - 22, C_FRAME);
+  rect(0, 0, W, SB, C_STATUS);
+  rect(0, SB, W, H - SB, C_FRAME);
   rect(LX, FT, 6 * PW, FB - FT, C_FELT);
   rect(RFX, FT, 6 * PW, FB - FT, C_FELT);
-  rect(BARX, 22, BARW, H - 22, C_BAR);
+  rect(BARX, SB, BARW, H - SB, C_BAR);
   rect(TRX, FT, TRW, FB - FT, C_TRAY);
   // Points, skipping a row whose triangles don't reach this band.
   bool topRow = oy < FT + PH + 1, botRow = oy + BAND > FB - PH - 1;
@@ -429,7 +406,7 @@ static void drawBand() {
   if (phase == MOVE && sel < 0) {
     for (int p = 1; p <= 24; p++) if (canMoveFrom(p)) {
       int c; bool top; pointGeom(p, c, top);
-      rect(colX(c) + 4, top ? FT : FB - 4, PW - 8, 4, C_SEL);
+      rect(colX(c) + ss(4), top ? FT : FB - ss(4), PW - 2 * ss(4), ss(4), C_SEL);
     }
   }
   if (sel > 0 && sel <= 24) {
@@ -450,11 +427,12 @@ static void drawBand() {
     }
   }
   int bx = BARX + BARW / 2;
-  for (int i = 0; i < g.bar[1]; i++) checker(bx, MIDY - 40 - i * STEP, false);
-  for (int i = 0; i < g.bar[0]; i++) checker(bx, MIDY + 40 + i * STEP, true);
+  for (int i = 0; i < g.bar[1]; i++) checker(bx, MIDY - BAROFF - i * STEP, false);
+  for (int i = 0; i < g.bar[0]; i++) checker(bx, MIDY + BAROFF + i * STEP, true);
   drawCube();
-  if (sel == 25) cv.drawRect(BARX, MIDY + 26 - oy, BARW, g.bar[0] * STEP + 2, C_SEL);
-  else if (phase == MOVE && sel < 0 && canMoveFrom(25)) rect(BARX + 4, MIDY + 22, BARW - 8, 4, C_SEL);
+  if (sel == 25) cv.drawRect(BARX, MIDY + BAROFF - CR - 1 - oy, BARW, g.bar[0] * STEP + 2, C_SEL);
+  else if (phase == MOVE && sel < 0 && canMoveFrom(25))
+    rect(BARX + ss(4), MIDY + BAROFF - CR - ss(5), BARW - 2 * ss(4), ss(4), C_SEL);
   // The CPU's last move (orange) or a hint (cyan): rings where checkers left,
   // dots where they landed.
   if (cpuMarks) drawMarks(cpuBefore, g, false, C_CPU);
@@ -462,8 +440,12 @@ static void drawBand() {
   if (flying) checker(flyX, flyY, flyMine);
   if (clipX1 > TRX) {  // the tray: borne off, dice and prompts (skipped when not being redrawn)
   // borne off
-  for (int i = 0; i < g.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
-  for (int i = 0; i < g.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
+  for (int i = 0; i < g.off[1]; i++) {
+    rect(TRX + 3, FT + 2 + i * OFFS, TRW - 6, OFFS - 1, C_OPRIM); rect(TRX + 4, FT + 3 + i * OFFS, TRW - 8, OFFS - 3, C_OP);
+  }
+  for (int i = 0; i < g.off[0]; i++) {
+    rect(TRX + 3, FB - OFFS - 1 - i * OFFS, TRW - 6, OFFS - 1, C_MERIM); rect(TRX + 4, FB - OFFS - i * OFFS, TRW - 8, OFFS - 3, C_ME);
+  }
   // dice
   if (dice[0]) {  // the last dice stay on show until new ones are rolled
     bool dbl = dice[0] == dice[1];
@@ -473,27 +455,28 @@ static void drawBand() {
       if (phase != PASS)  // a dance leaves both dice unusable
         for (int i = 0; i < nrem; i++) { if (rem[i] == dice[0]) used0 = false; if (rem[i] == dice[1]) used1 = false; }
     }
-    die(TRX + 2, MIDY - 11, dice[0], cpuDice, used0);
-    die(TRX + 26, MIDY - 11, dice[1], cpuDice, used1);
+    int dx = TRX + (TRW - 2 * DS - ss(2)) / 2;  // two dice, centred in the tray
+    die(dx, MIDY - DS / 2, dice[0], cpuDice, used0);
+    die(dx + DS + ss(2), MIDY - DS / 2, dice[1], cpuDice, used1);
     if (dbl && phase == MOVE && !cpuDice) {
       cv.setFont(&F_S16); cv.setTextColor(C_TEXT); cv.setTextDatum(middle_center);
       char b[4]; snprintf(b, sizeof b, "x%d", nrem);
-      text(b, TRX + TRW / 2, MIDY + 22);
+      text(b, TRX + TRW / 2, MIDY + DS / 2 + ss(11));
     }
   }
   if (phase == OVER && blinkOn) {  // the game is over: the tray starts the next
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
-    int ny = dice[0] ? MIDY + 24 : MIDY - 9;  // under the dice, where ROLL goes
+    int ny = dice[0] ? MIDY + DS / 2 + ss(13) : MIDY - ss(9);  // under the dice, where ROLL goes
     text("NEW", TRX + TRW / 2, ny);
-    text("GAME", TRX + TRW / 2, ny + 18);
+    text("GAME", TRX + TRW / 2, ny + ss(18));
   }
   if ((phase == DONE || phase == PASS) && blinkOn) {  // hand the dice over
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
-    text(phase == PASS ? "PASS" : "DONE", TRX + TRW / 2, MIDY + 24);
+    text(phase == PASS ? "PASS" : "DONE", TRX + TRW / 2, MIDY + DS / 2 + ss(13));
   }
   if (phase == ROLL && !tumbling && blinkOn) {
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
-    text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + 24 : MIDY);
+    text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + DS / 2 + ss(13) : MIDY);
   }
   }  // tray
   // targets for the selected checker
@@ -502,26 +485,27 @@ static void drawBand() {
     for (int i = 0; i < npaths; i++) {
       int x, y;
       targetXY(paths[i].to, x, y);
-      if (paths[i].n == 1) dot(x, y, 6, C_SEL);
-      else { dot(x, y, 7, C_SEL); dot(x, y, 4, C_FELT); }
+      if (paths[i].n == 1) dot(x, y, ss(6), C_SEL);
+      else { dot(x, y, ss(7), C_SEL); dot(x, y, ss(4), C_FELT); }
     }
   }
   // status bar: menu | pips | message | eval (only in the bands it occupies -
   // smooth-font text is the costliest thing on the screen)
-  if (oy < 22) {
-    for (int i = 0; i < 3; i++) rect(6, 5 + i * 5, 20, 2, menuOpen ? C_SEL : C_TEXT);
+  if (oy < SB) {
+    const int my = SB / 2;  // text middle
+    for (int i = 0; i < 3; i++) rect(sx(6), my - sy(6) + i * sy(5), sx(20), sy(2), menuOpen ? C_SEL : C_TEXT);
     cv.setFont(&F_S16);
     cv.setTextDatum(middle_left);
-    checker(44, 11, true, 7);
-    cv.setTextColor(C_TEXT); number(pips(g, 0), 56, 11);
-    checker(100, 11, false, 7);
-    number(pips(g, 1), 112, 11);
+    checker(sx(44), my, true, ss(7));
+    cv.setTextColor(C_TEXT); number(pips(g, 0), sx(56), my);
+    checker(sx(100), my, false, ss(7));
+    number(pips(g, 1), sx(112), my);
     cv.setTextDatum(middle_center);
     // Waiting for a tap to pass / start a new game: the message pulses.
     cv.setTextColor(C_TEXT);
-    text(msg, 262, 11);
+    text(msg, sx(262), my);
     cv.setTextDatum(middle_right);
-    cv.setTextColor(evalCol); text(evalTxt, W - 6, 11);
+    cv.setTextColor(evalCol); text(evalTxt, W - sx(6), my);
   }
   if (dialogUp() && !menuOpen) drawDialog();
   if (menuOpen) drawMenu();
@@ -562,8 +546,8 @@ static void redrawRegion(int x0, int y0, int x1, int y1) {
 // Screen centre of the checker in slot i (0 = bottom of the stack) of spot p
 // for one side: p 1..24 point, 25 bar, 0 borne off.
 static void slotXY(bool mine, int p, int i, int& x, int& y) {
-  if (p == 25) { x = BARX + BARW / 2; y = mine ? MIDY + 40 + i * STEP : MIDY - 40 - i * STEP; return; }
-  if (p == 0) { x = TRX + TRW / 2; y = mine ? FB - 6 - i * 8 : FT + 5 + i * 8; return; }
+  if (p == 25) { x = BARX + BARW / 2; y = mine ? MIDY + BAROFF + i * STEP : MIDY - BAROFF - i * STEP; return; }
+  if (p == 0) { x = TRX + TRW / 2; y = mine ? FB - OFFS / 2 - 2 - i * OFFS : FT + OFFS / 2 + 1 + i * OFFS; return; }
   int c; bool top; pointGeom(p, c, top);
   x = colX(c) + PW / 2; y = stackY(top, min(i, 4));
 }
@@ -628,12 +612,12 @@ static void tumble(int d1, int d2, bool cpu) {
   tumbling = true; cpuDice = cpu;
   for (int i = 0; i < 12; i++) {  // slowing down, ~0.9 s in all
     dice[0] = random(1, 7); dice[1] = random(1, 7);
-    redrawRegion(TRX, MIDY - 16, W, MIDY + 40);
+    redrawRegion(TRX, MIDY - TAP_H, W, MIDY + TAP_D);
     delay(40 + i * 8);
   }
   dice[0] = d1; dice[1] = d2;
   tumbling = false;
-  redrawRegion(TRX, MIDY - 16, W, MIDY + 40);
+  redrawRegion(TRX, MIDY - TAP_H, W, MIDY + TAP_D);
 }
 
 // The CPU's chosen result as single checker steps (CPU-relative), via the same
@@ -681,7 +665,7 @@ static void cpuTurn(int d1, int d2, bool full = true) {
   nsubs = 0; sel = -1; cpuMarks = false;
   if (full) draw();
   tumble(d1, d2, true);
-  if (!full) redrawRegion(0, 0, W, 22);  // status line after: the dice go first
+  if (!full) redrawRegion(0, 0, W, SB);  // status line after: the dice go first
   uint32_t t0 = millis();
   BgBoard me = bg_swap(g);
   int n = bg_genmoves(me, d1, d2, kids, 1024);
@@ -997,13 +981,13 @@ static int hitSpot(int x, int y) {
 static void tap(int x, int y) {
   tapAt = millis();
   if (menuOpen) { menuTap(x, y); return; }
-  if (y < 26 && x < 40) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
+  if (y < SB + ss(4) && x < sx(40)) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
   if (phase == OVER) {  // only NEW GAME (the tray) starts the next game
-    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) { newGame(); draw(); }
+    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) { newGame(); draw(); }
     return;
   }
   if (phase == PASS) {  // no legal move: the dice hand over, as for DONE
-    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) { endHumanTurn(); draw(); }
+    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) { endHumanTurn(); draw(); }
     else { snprintf(msg, sizeof msg, "No legal move: tap the dice"); draw(); }
     return;
   }
@@ -1037,11 +1021,11 @@ static void tap(int x, int y) {
   }
   if (phase == ROLL) {
     // Tap the cube to double.
-    if (x >= BARX - 4 && x < BARX + BARW + 4 && abs(y - (cubeY() + CUBE_S / 2)) < CUBE_S) {
+    if (x >= BARX - ss(4) && x < BARX + BARW + ss(4) && abs(y - (cubeY() + CUBE_S / 2)) < CUBE_S) {
       if (canDouble()) { humanDouble(); draw(); }
       return;
     }
-    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) {
+    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) {
       cpuMarks = false;
       int d1 = random(1, 7), d2 = random(1, 7);
       tumble(d1, d2, false);
@@ -1052,7 +1036,7 @@ static void tap(int x, int y) {
     return;
   }
   if (phase == DONE) {  // only the dice do anything now: hand over
-    if (x >= TRX && y >= MIDY - 30 && y <= MIDY + 40) { endHumanTurn(); draw(); }
+    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) { endHumanTurn(); draw(); }
     else { snprintf(msg, sizeof msg, "Tap the dice to finish"); draw(); }
     return;
   }
@@ -1067,7 +1051,7 @@ static void tap(int x, int y) {
   for (int i = 0; i < npaths; i++) sIsTarget |= paths[i].to == s;
   bool switching = s > 0 && s != sel && canMoveFrom(s) && !sIsTarget;  // picking another checker
   if (sel > 0 && !switching) {
-    int best = 28 * 28;
+    int best = ss(28) * ss(28);
     for (int i = 0; i < npaths; i++) {
       int tx, ty; targetXY(paths[i].to, tx, ty);
       int d = (tx - x) * (tx - x) + (ty - y) * (ty - y);
@@ -1078,7 +1062,7 @@ static void tap(int x, int y) {
   if (tgt < 0 && y >= FT && y < FB) {
     if (s > 0 && canMoveFrom(s)) src = s;
     else {
-      int best = PW / 2 + 9;  // up to ~8 px into a neighbouring column
+      int best = PW / 2 + ss(9);  // up to ~8 px into a neighbouring column
       for (int p = 1; p <= 25; p++) {
         if (!canMoveFrom(p)) continue;
         int cx = p == 25 ? BARX + BARW / 2 : pointCX(p);
@@ -1163,7 +1147,8 @@ void setup() {
   Serial.begin(921600);
   netOk = net.load(net_bin, NET_FLASH_SRAM);  // grab the 32 KB chunks first
   lcd.init();
-  lcd.setRotation(1);
+  lcd.setRotation(BOARD_ROTATION);
+  lcd.fillScreen(TFT_BLACK);  // a smaller test layout leaves the rest of the panel black
   lcd.setBrightness(200);
   cv.setColorDepth(16);
   if (!cv.createSprite(W, BAND)) Serial.println("sprite alloc failed");
@@ -1202,7 +1187,7 @@ void loop() {
   if (netOk && !menuOpen && millis() - lastBlink > 450 && (phase == ROLL || phase == PASS || phase == OVER || phase == DONE)) {
     lastBlink = millis();
     blinkOn = !blinkOn;
-    redrawRegion(TRX, MIDY - 20, W, MIDY + 54);
+    redrawRegion(TRX, MIDY - TAP_H, W, MIDY + TAP_D + ss(14));
   } else if (phase == MOVE || phase == OFFER) blinkOn = true;
   // Resistive touch: the first samples of a press are unreliable, so collect
   // the whole press and act on release at the median position.

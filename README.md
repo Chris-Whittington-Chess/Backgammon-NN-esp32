@@ -109,7 +109,8 @@ When a game ends (played out, dropped or resigned) the status bar shows the resu
 
 ### How it fits without PSRAM
 
-- The frame is drawn in 480x20 bands through one 19 KB sprite. Animation redraws only the bands
+- The frame is drawn in 20-row bands through one small sprite (19 KB at 480 wide); checker faces
+  are pre-rendered once into tiny sprites, so a full redraw takes ~0.35 s. Animation redraws only the bands
   a moving piece crosses, clipped to its columns (~140 fps); fonts are anti-aliased DejaVu Sans
   rendered by `tools/make_fonts.py`.
 - The net is read from flash in place, except the dense layer-2 matrix (128 KB, read in full
@@ -137,6 +138,50 @@ Other serial commands: `n` new game, `t X Y` simulated tap, `d` dump the frame (
 `tools/grab.py`), `k` recalibrate, `a N` self-play (the net plays both sides for N exchanges
 with random dice, the last CPU move shown as usual - real-game positions for screenshots). Test positions: `g` / `h` cube races, `p` closed out (pass),
 `q` about to be gammoned (resign), `r` CPU hopeless (it resigns).
+
+## Porting to another display
+
+The game itself (`src/game/main.cpp`) knows nothing about the hardware. Everything specific to a
+board lives in one header under `include/boards/`, picked by a build flag:
+
+| Build env | Board | Status |
+|---|---|---|
+| `e32r40t` | 4.0" ESP32-32E display, ST7796S 480x320, XPT2046 touch | reference board |
+| `e32r40t_320x240` | the same board, drawing the 320x240 layout in its top-left corner | test of the small layout |
+| `cyd28` | 2.8" "Cheap Yellow Display" ESP32-2432S028R, ILI9341 320x240, XPT2046 touch | example, untested on hardware |
+
+**A new board with a 480x320 or 320x240 screen**
+
+1. Copy the nearest header in `include/boards/` and change the `LGFX` class: the panel type
+   (LovyanGFX supports e.g. `Panel_ST7796`, `Panel_ILI9341`, `Panel_ILI9488`, `Panel_ST7789`,
+   RGB parallel panels), the SPI bus and pins, the backlight pin, and the touch controller
+   (`Touch_XPT2046`, `Touch_FT5x06`, `Touch_GT911`, `Touch_CST816S`, ...). Set `W`, `H`
+   (landscape), `BOARD_ROTATION` and the two font sizes.
+2. Add a `#elif defined(BOARD_xxx)` line for it in `include/board.h`.
+3. Add a `[env:xxx]` to `platformio.ini` with `-DBOARD_xxx`, its board and pins, and the font
+   files for its sizes.
+
+If the colours come out wrong, try the panel's `invert` and `rgb_order` settings. Touch is
+calibrated on the board at first boot, so the touch ranges in the header only need to be roughly
+right.
+
+**A different resolution**
+
+The layout was designed at 480x320 and is computed from `W` and `H`: widths scale with `W`,
+heights with `H`, and checkers, dice, text and menus with the smaller of the two, so the pieces
+are always round and everything is drawn in code at the new size (there are no images). Two
+compile-time checks stop a layout whose checkers wouldn't fit. Fonts are the one thing made in
+advance: add the sizes to `SIZES` in `tools/make_fonts.py` and re-run it (16 / 21 px suit
+480x320, 11 / 14 px suit 320x240).
+
+**What a board needs**
+
+- A touch screen, landscape (or rotated to landscape), **320x240 or larger**. At 320x240 the points
+  are about 21 px wide - a fingertip works, a stylus is easier. Below that the checkers and text
+  get too small to use.
+- An ESP32 with **4 MB flash** (the program is ~0.95 MB, including the 364 KB network) and
+  ~128 KB of free internal RAM for the network's second layer. PSRAM isn't needed; an ESP32-S3
+  with PSRAM is faster, and large parallel-RGB panels (800x480) need it for their frame buffer.
 
 ## Net export
 

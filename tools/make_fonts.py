@@ -15,12 +15,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 TTF = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
 OUT = Path(__file__).resolve().parents[1] / "data" / "fonts"
-FONTS = {  # name: (ttf, pixel size)
-    "sans16": ("DejaVuSans.ttf", 16),
-    "bold16": ("DejaVuSans-Bold.ttf", 16),
-    "sans21": ("DejaVuSans.ttf", 21),
-    "bold21": ("DejaVuSans-Bold.ttf", 21),
-}
+# A board uses two sizes (FONT_PX_S / FONT_PX_L in its header), each in regular and bold:
+# 16 / 21 px for 480x320 layouts, 11 / 14 px for 320x240. Add sizes here for new boards.
+SIZES = [16, 21, 11, 14]
+FONTS = {}  # name: (ttf, pixel size)
+for px in SIZES:
+    FONTS[f"sans{px}"] = ("DejaVuSans.ttf", px)
+    FONTS[f"bold{px}"] = ("DejaVuSans-Bold.ttf", px)
 
 
 def vlw(ttf, size):
