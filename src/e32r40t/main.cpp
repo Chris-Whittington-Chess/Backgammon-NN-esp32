@@ -345,6 +345,7 @@ static const int CUBE_S = 26;
 static int cubeY() { return cubeOwn > 0 ? FB - CUBE_S - 4 : cubeOwn < 0 ? FT + 4 : MIDY - CUBE_S / 2; }
 static void drawCube() {
   int x = BARX + (BARW - CUBE_S) / 2, y = cubeY();
+  if (y + CUBE_S + 3 < oy || y - 3 > oy + BAND || x + CUBE_S + 3 < clipX0 || x - 3 >= clipX1) return;
   bool may = phase == ROLL && cubeOwn >= 0 && cubeVal < 64;
   if (may) cv.fillSmoothRoundRect(x - 3, y - 3 - oy, CUBE_S + 6, CUBE_S + 6, 7, C_SEL);
   cv.fillSmoothRoundRect(x, y - oy, CUBE_S, CUBE_S, 5, 0xEF3A);
@@ -410,7 +411,7 @@ static void drawBand() {
     bool mine = n > 0; int a = abs(n), c; bool top; pointGeom(p, c, top);
     int cx = colX(c) + PW / 2;
     for (int i = 0; i < min(a, 5); i++) checker(cx, stackY(top, i), mine);
-    if (a > 5 && abs(stackY(top, 4) - oy - BAND / 2) < BAND) {
+    if (a > 5 && abs(stackY(top, 4) - oy - BAND / 2) < BAND && cx + CR >= clipX0 && cx - CR < clipX1) {
       cv.setFont(a >= 10 ? &F_B16 : &F_B21);  // two digits must fit on the checker
       cv.setTextColor(mine ? TFT_BLACK : C_ME); number(a, cx, stackY(top, 4) + 1);
     }
@@ -426,6 +427,7 @@ static void drawBand() {
   if (cpuMarks) drawMarks(cpuBefore, g, false, C_CPU);
   if (hintMarks) drawMarks(hintBefore, hintAfter, true, C_HINT);
   if (flying) checker(flyX, flyY, flyMine);
+  if (clipX1 > TRX) {  // the tray: borne off, dice and prompts (skipped when not being redrawn)
   // borne off
   for (int i = 0; i < g.off[1]; i++) { rect(TRX + 3, FT + 2 + i * 8, TRW - 6, 7, C_OPRIM); rect(TRX + 4, FT + 3 + i * 8, TRW - 8, 5, C_OP); }
   for (int i = 0; i < g.off[0]; i++) { rect(TRX + 3, FB - 9 - i * 8, TRW - 6, 7, C_MERIM); rect(TRX + 4, FB - 8 - i * 8, TRW - 8, 5, C_ME); }
@@ -459,6 +461,7 @@ static void drawBand() {
     cv.setFont(&F_B16); cv.setTextColor(C_SEL); cv.setTextDatum(middle_center);
     text("ROLL", TRX + TRW / 2, dice[0] ? MIDY + 24 : MIDY);
   }
+  }  // tray
   // targets for the selected checker
   // Filled dot: one die. Ring: several dice with the same checker.
   if (sel > 0) {
@@ -501,18 +504,22 @@ static void draw() {
 // Redraw just the rectangle [x0,x1) x [y0,y1): only the bands it touches, with
 // both the sprite and the panel clipped to its columns, so a frame costs a few
 // ms instead of a full ~100 ms redraw.
+static uint32_t profBands, profDrawUs, profPushUs;  // animation profiling (fly log)
 static void redrawRegion(int x0, int y0, int x1, int y1) {
   x0 = max(x0, 0); x1 = min(x1, W); y0 = max(y0, 0); y1 = min(y1, H);
   if (x0 >= x1 || y0 >= y1) return;
   for (oy = y0 / BAND * BAND; oy < y1; oy += BAND) {
     cv.setClipRect(x0, 0, x1 - x0, BAND);
     clipX0 = x0; clipX1 = x1;
+    uint32_t t0 = micros();
     drawBand();
+    uint32_t t1 = micros();
     clipX0 = 0; clipX1 = W;
     cv.clearClipRect();
     lcd.setClipRect(x0, oy, x1 - x0, BAND);
     cv.pushSprite(0, oy);
     lcd.clearClipRect();
+    profBands++; profDrawUs += t1 - t0; profPushUs += micros() - t1;
   }
 }
 
@@ -536,6 +543,7 @@ static void fly(int x0, int y0, int x1, int y1, bool mine) {
   float dist = sqrtf(float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
   uint32_t dur = 400 + (uint32_t)(dist * 1.8f), t0 = millis();  // ~0.4-1.2 s
   flying = true; flyMine = mine;
+  profBands = profDrawUs = profPushUs = 0;
   int px = x0, py = y0, frames = 0;
   for (;; frames++) {
     float t = min(1.0f, (millis() - t0) / float(dur));
@@ -546,7 +554,8 @@ static void fly(int x0, int y0, int x1, int y1, bool mine) {
     if (t >= 1) break;
   }
   flying = false;
-  Serial.printf("fly %.0f px: %d frames in %u ms\n", dist, frames + 1, millis() - t0);
+  Serial.printf("fly %.0f px: %d frames in %u ms (%u bands, draw %u us + push %u us per band)\n", dist, frames + 1,
+                millis() - t0, profBands, profDrawUs / max(profBands, 1u), profPushUs / max(profBands, 1u));
 }
 
 // Animate one checker step from board a to board b (both from your side).
@@ -577,7 +586,9 @@ static void animateStep(const BgBoard& a, const BgBoard& b, int from, int to, bo
 }
 
 // Tumble the dice in the tray for ~0.4 s before showing d1-d2.
+static uint32_t tapAt;  // when the last tap was handled (handover latency log)
 static void tumble(int d1, int d2, bool cpu) {
+  if (cpu) Serial.printf("dice start %u ms after the tap\n", millis() - tapAt);
   tumbling = true; cpuDice = cpu;
   for (int i = 0; i < 12; i++) {  // slowing down, ~0.9 s in all
     dice[0] = random(1, 7); dice[1] = random(1, 7);
@@ -627,11 +638,14 @@ static void gameOver(int pts, bool youWon, const char* how = nullptr) {
   sel = -1; nsubs = 0;
 }
 
-static void cpuTurn(int d1, int d2) {
+// full: redraw everything first (after a dialog, or a fresh board); from your
+// own turn only the status line changes, so the dice start tumbling at once.
+static void cpuTurn(int d1, int d2, bool full = true) {
   snprintf(msg, sizeof msg, "CPU rolls %d-%d...", d1, d2);
   nsubs = 0; sel = -1; cpuMarks = false;
-  draw();
+  if (full) draw();
   tumble(d1, d2, true);
+  if (!full) redrawRegion(0, 0, W, 22);  // status line after: the dice go first
   uint32_t t0 = millis();
   BgBoard me = bg_swap(g);
   int n = bg_genmoves(me, d1, d2, kids, 1024);
@@ -707,8 +721,6 @@ static BgCubeCall cubeCall(const BgBoard& onRoll, int own) {
 
 static void endHumanTurn() {
   nsubs = 0; sel = -1;
-  draw();
-  delay(250);
   // A hopeless CPU resigns rather than play on: the least you'd accept -
   // a single unless you have real gammon (or backgammon) chances.
   if (!cpuResignRefused) {
@@ -742,7 +754,7 @@ static void endHumanTurn() {
       return;
     }
   }
-  cpuTurn(random(1, 7), random(1, 7));
+  cpuTurn(random(1, 7), random(1, 7), false);  // the board is already on screen
 }
 
 // You double before rolling: the CPU takes or drops by the same model.
@@ -910,6 +922,7 @@ static int hitSpot(int x, int y) {
 }
 
 static void tap(int x, int y) {
+  tapAt = millis();
   if (menuOpen) { menuTap(x, y); return; }
   if (y < 26 && x < 40) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
   if (phase == OVER) {  // only NEW GAME (the tray) starts the next game
