@@ -83,7 +83,7 @@ static bool menuOpen;
 static bool flying, flyMine, tumbling;  // animation: a checker in flight / dice rolling
 static bool blinkOn = true;             // ROLL / waiting prompts wink on and off
 static int flyX, flyY;
-static bool touchLog;
+static bool touchLog;  // serial L / R: play-time logging (off by default)
 // Animation speed (menu on boards without touch calibration, kept in NVS):
 // a factor on slide and tumble times; Off skips the animation.
 static const float SPEED_F[4] = {1.0f, 0.5f, 0.25f, 0.0f};
@@ -544,7 +544,7 @@ static void draw() {
     drawBand();
     display_push(cv, oy, 0, W);
   }
-  Serial.printf("full draw %u ms\n", millis() - t0);
+  if (touchLog) Serial.printf("full draw %u ms\n", millis() - t0);
 }
 
 // ---- animation ----
@@ -607,7 +607,7 @@ static void fly(int x0, int y0, int x1, int y1, bool mine, float pace = 1) {
     if (t >= 1) break;
   }
   flying = false;
-  Serial.printf("fly %.0f px: %d frames in %u ms (%u bands, draw %u us + push %u us per band)\n", dist, frames + 1,
+  if (touchLog) Serial.printf("fly %.0f px: %d frames in %u ms (%u bands, draw %u us + push %u us per band)\n", dist, frames + 1,
                 millis() - t0, profBands, profDrawUs / max(profBands, (uint32_t)1), profPushUs / max(profBands, (uint32_t)1));
 }
 
@@ -642,7 +642,7 @@ static void animateStep(const BgBoard& a, const BgBoard& b, int from, int to, bo
 // Tumble the dice in the tray for ~0.4 s before showing d1-d2.
 static uint32_t tapAt;  // when the last tap was handled (handover latency log)
 static void tumble(int d1, int d2, bool cpu) {
-  if (cpu) Serial.printf("dice start %u ms after the tap\n", millis() - tapAt);
+  if (cpu && touchLog) Serial.printf("dice start %u ms after the tap\n", millis() - tapAt);
   float f = SPEED_F[animSpeed] / SPEED_F[1];  // Normal = ~0.4 s
   tumbling = true; cpuDice = cpu;
   for (int i = 0; i < (f > 0 ? 8 : 0); i++) {  // slowing down, ~0.4 s in all: a roll shouldn't feel like a wait
@@ -722,7 +722,7 @@ static void cpuTurn(int d1, int d2, bool full = true) {
   }
   g = bg_swap(kids[best]);
   cpuMarks = true;
-  Serial.printf("cpu %d-%d: %d moves, %u ms\n", d1, d2, n, ms);
+  if (touchLog) Serial.printf("cpu %d-%d: %d moves, %u ms\n", d1, d2, n, ms);
   if (int r = bg_result(kids[best])) { gameOver(r, false); return; }
   snprintf(msg, sizeof msg, n == 1 && !memcmp(&kids[0], &me, sizeof me) ? "CPU can't move" : "CPU played %d-%d", d1, d2);
   phase = ROLL;
@@ -810,7 +810,7 @@ static void endHumanTurn() {
   // Before rolling, the CPU may double (cube centred or its own).
   if (cubeOwn <= 0 && cubeVal < 64) {
     BgCubeCall c = cubeCall(bg_swap(g), -cubeOwn);
-    Serial.printf("cpu cube: nd %.3f dt %.3f dp %.3f -> %s\n", c.nd, c.dt, c.dp, c.dbl ? "double" : "no double");
+    if (touchLog) Serial.printf("cpu cube: nd %.3f dt %.3f dp %.3f -> %s\n", c.nd, c.dt, c.dp, c.dbl ? "double" : "no double");
     if (c.dbl) {
       phase = OFFER;
       snprintf(msg, sizeof msg, "CPU doubles to %d", cubeVal * 2);
@@ -829,7 +829,7 @@ static void endHumanTurn() {
 // You double before rolling: the CPU takes or drops by the same model.
 static void humanDouble() {
   BgCubeCall c = cubeCall(g, cubeOwn);
-  Serial.printf("you double: nd %.3f dt %.3f dp %.3f -> cpu %s\n", c.nd, c.dt, c.dp, c.take ? "takes" : "drops");
+  if (touchLog) Serial.printf("you double: nd %.3f dt %.3f dp %.3f -> cpu %s\n", c.nd, c.dt, c.dp, c.take ? "takes" : "drops");
   if (!c.take) { gameOver(0, true); return; }
   cubeVal *= 2; cubeOwn = -1;
   snprintf(msg, sizeof msg, "CPU takes - cube at %d", cubeVal);
@@ -950,12 +950,12 @@ static void settleOffer(int level) {
   float you = yourPlayOnEquity();
   if (!claiming) {
     float cpuExp = -you;
-    Serial.printf("you resign %d: cpu expects %.3f\n", level, cpuExp);
+    if (touchLog) Serial.printf("you resign %d: cpu expects %.3f\n", level, cpuExp);
     if (level >= cpuExp - TOL) { gameOver(level, false, "you resigned"); return; }
     counterLevel = cpuExp - TOL <= 2 ? 2 : 3;  // the smallest it would take
     snprintf(offerTxt, sizeof offerTxt, "It expects %.2f by playing on", cpuExp);
   } else {
-    Serial.printf("you claim %d: you expect %.3f\n", level, you);
+    if (touchLog) Serial.printf("you claim %d: you expect %.3f\n", level, you);
     if (level <= you + TOL) { gameOver(level, true, "CPU conceded"); return; }
     counterLevel = you + TOL >= 2 ? 2 : you + TOL >= 1 ? 1 : 0;  // the most it would give
     if (!counterLevel) {
@@ -1140,7 +1140,7 @@ static void tap(int x, int y) {
       }
     }
   }
-  Serial.printf("tap %d,%d -> spot %d, target %d, source %d (sel %d)\n", x, y, s,
+  if (touchLog) Serial.printf("tap %d,%d -> spot %d, target %d, source %d (sel %d)\n", x, y, s,
                 tgt >= 0 ? paths[tgt].to : -1, src, sel);
   if (tgt >= 0) { applyPath(paths[tgt]); draw(); return; }
   // Nothing selected and a destination tapped: if exactly one of your checkers
@@ -1236,6 +1236,12 @@ static void dumpFrame() {
 
 void setup() {
   Serial.begin(921600);
+#if ARDUINO_USB_CDC_ON_BOOT
+  // The S3's own USB serial waits (up to ~100 ms per write) when its buffer is
+  // full and the PC isn't reading - which made the game crawl once a log
+  // reader went away. Drop output instead of waiting.
+  Serial.setTxTimeoutMs(0);
+#endif
   netOk = net.load(net_bin, BOARD_NET_PLACE);  // first: no-PSRAM boards need its 32 KB chunks
   display_begin();
   cv.setColorDepth(16);
