@@ -577,7 +577,8 @@ static int countAt(const BgBoard& b, bool mine, int p) {
 // Slide a checker from (x0,y0) to (x1,y1), eased, ~120-400 ms by distance.
 static void fly(int x0, int y0, int x1, int y1, bool mine) {
   float dist = sqrtf(float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
-  uint32_t dur = 400 + (uint32_t)(dist * 1.8f), t0 = millis();  // ~0.4-1.2 s
+  // ~0.4-1.2 s, timed by distance in design (480x320) pixels so every screen size moves alike
+  uint32_t dur = 400 + (uint32_t)(dist / LSS * 1.8f), t0 = millis();
   flying = true; flyMine = mine;
   profBands = profDrawUs = profPushUs = 0;
   int px = x0, py = y0, frames = 0;
@@ -1212,7 +1213,7 @@ void loop() {
   if (touch_get(&x, &y)) {
     if (ns < 64) { sx[ns] = x; sy[ns] = y; ns++; }
     idle = 0;
-  } else if (ns && ++idle >= 3) {  // ~30 ms without contact = released
+  } else if (ns && ++idle >= (BOARD_TOUCH_CALIBRATION ? 3 : 1)) {  // released (resistive: ~30 ms without contact)
     int skip = ns > 4 ? 2 : 0, m = ns - skip;
     std::sort(sx + skip, sx + ns);
     std::sort(sy + skip, sy + ns);
@@ -1229,6 +1230,15 @@ void loop() {
     if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
+    else if (ch == 'T') {  // touch test: print the raw readings for 10 s
+      uint32_t t0 = millis(); bool was = false;
+      while (millis() - t0 < 10000) {
+        int32_t tx, ty; bool d = touch_get(&tx, &ty);
+        if (d != was) { Serial.printf("touch %s %d,%d\n", d ? "down" : "up", tx, ty); was = d; }
+        delay(10);
+      }
+      Serial.println("touch test done");
+    }
     else if (ch == 'i')  // info (USB-native boards lose the boot log)
       Serial.printf("%s %dx%d: net %s, band sprite %s, free internal %u (largest %u), PSRAM %u\n", BOARD_NAME, W, H,
                     netOk ? "ok" : "FAILED", cv.getBuffer() ? "ok" : "MISSING",
