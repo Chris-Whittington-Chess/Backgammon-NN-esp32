@@ -130,9 +130,17 @@ static bool ws7_gt_read(uint16_t reg, uint8_t* buf, int n) {
 
 // The GT911 reports new data with bit 7 of 0x814E; between reports the last
 // state holds. Returns whether a finger is down, and where.
+//
+// While a finger is down the GT911 reports about every 10 ms. It also keeps
+// its last report until we acknowledge it, so if the game was busy (an
+// animation) when the finger lifted, the "lifted" report is never written and
+// the last "down" one is read afterwards - the board would think the finger
+// was still there and miss the next tap. So: no fresh report for 60 ms while
+// down means the finger has gone.
 static bool touch_get(int32_t* x, int32_t* y) {
   static bool down;
   static int32_t lx, ly;
+  static uint32_t lastReport;
   uint8_t st;
   if (ws7_gt_read(0x814E, &st, 1) && (st & 0x80)) {
     down = false;
@@ -143,6 +151,9 @@ static bool touch_get(int32_t* x, int32_t* y) {
     Wire.beginTransmission(ws7_gt911);
     Wire.write(0x81); Wire.write(0x4E); Wire.write(0);
     Wire.endTransmission();
+    lastReport = millis();
+  } else if (down && millis() - lastReport > 60) {
+    down = false;  // reports stopped: the finger lifted while we weren't looking
   }
   *x = lx; *y = ly;
   return down;
