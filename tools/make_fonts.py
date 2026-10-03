@@ -16,8 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 TTF = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
 OUT = Path(__file__).resolve().parents[1] / "data" / "fonts"
 # A board uses two sizes (FONT_PX_S / FONT_PX_L in its header), each in regular and bold:
-# 16 / 21 px for 480x320 layouts, 11 / 14 px for 320x240. Add sizes here for new boards.
-SIZES = [16, 21, 11, 14]
+# 16 / 21 px for 480x320 layouts, 11 / 14 px for 320x240, 24 / 32 px for 800x480. Add sizes here for new boards.
+SIZES = [16, 21, 11, 14, 24, 32]
 FONTS = {}  # name: (ttf, pixel size)
 for px in SIZES:
     FONTS[f"sans{px}"] = ("DejaVuSans.ttf", px)

@@ -45,8 +45,7 @@ static void loadFonts() {
   }
 }
 
-static LGFX lcd;
-static LGFX_Sprite cv(&lcd);
+static LGFX_Sprite cv;  // one band of the frame; the board's display_push() puts it on screen
 static Preferences prefs;
 static BgNet net;
 static bool netOk;
@@ -295,6 +294,7 @@ static bool menuEnabled(int i) {
   if (i == 0) return (phase == MOVE || phase == DONE) && nsteps > 0;
   if (i == 2) return canTakeBack();
   if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
+  if (i == 6) return BOARD_TOUCH_CALIBRATION;         // capacitive boards don't calibrate
   if (i == 4 || i == 7) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
   return true;
 }
@@ -515,7 +515,7 @@ static void draw() {
   uint32_t t0 = millis();
   for (oy = 0; oy < H; oy += BAND) {
     drawBand();
-    cv.pushSprite(0, oy);
+    display_push(cv, oy, 0, W);
   }
   Serial.printf("full draw %u ms\n", millis() - t0);
 }
@@ -536,9 +536,7 @@ static void redrawRegion(int x0, int y0, int x1, int y1) {
     uint32_t t1 = micros();
     clipX0 = 0; clipX1 = W;
     cv.clearClipRect();
-    lcd.setClipRect(x0, oy, x1 - x0, BAND);
-    cv.pushSprite(0, oy);
-    lcd.clearClipRect();
+    display_push(cv, oy, x0, x1);
     profBands++; profDrawUs += t1 - t0; profPushUs += micros() - t1;
   }
 }
@@ -575,7 +573,7 @@ static void fly(int x0, int y0, int x1, int y1, bool mine) {
   }
   flying = false;
   Serial.printf("fly %.0f px: %d frames in %u ms (%u bands, draw %u us + push %u us per band)\n", dist, frames + 1,
-                millis() - t0, profBands, profDrawUs / max(profBands, 1u), profPushUs / max(profBands, 1u));
+                millis() - t0, profBands, profDrawUs / max(profBands, (uint32_t)1), profPushUs / max(profBands, (uint32_t)1));
 }
 
 // Animate one checker step from board a to board b (both from your side).
@@ -952,16 +950,12 @@ static const char* whyNot(int p) {
 }
 
 // ---- touch ----
+// Resistive-touch boards calibrate on the board (4 corners) and keep it in NVS;
+// capacitive ones (BOARD_TOUCH_CALIBRATION 0) need nothing.
 static void calibrate() {
+  if (!BOARD_TOUCH_CALIBRATION) return;
   uint16_t cal[8];
-  lcd.fillScreen(TFT_BLACK);
-  lcd.setTextColor(TFT_WHITE);
-  lcd.setFont(&fonts::FreeSans12pt7b);
-  lcd.setTextDatum(middle_center);
-  lcd.drawString("Touch calibration", W / 2, H / 2 - 16);
-  lcd.setFont(&fonts::FreeSans9pt7b);
-  lcd.drawString("Tap each corner arrow as it appears", W / 2, H / 2 + 14);
-  lcd.calibrateTouch(cal, TFT_YELLOW, TFT_BLACK, 24);
+  touch_calibrate(cal);
   prefs.putBytes("cal", cal, sizeof cal);
   Serial.println("calibrated");
 }
@@ -1145,17 +1139,15 @@ static void dumpFrame() {
 
 void setup() {
   Serial.begin(921600);
-  netOk = net.load(net_bin, NET_FLASH_SRAM);  // grab the 32 KB chunks first
-  lcd.init();
-  lcd.setRotation(BOARD_ROTATION);
-  lcd.fillScreen(TFT_BLACK);  // a smaller test layout leaves the rest of the panel black
-  lcd.setBrightness(200);
+  netOk = net.load(net_bin, BOARD_NET_PLACE);  // first: no-PSRAM boards need its 32 KB chunks
+  display_begin();
   cv.setColorDepth(16);
+  cv.setPsram(BOARD_SPRITE_PSRAM);  // PSRAM boards: keep internal SRAM for the net and the display
   if (!cv.createSprite(W, BAND)) Serial.println("sprite alloc failed");
   loadFonts();
-  Serial.printf("net %s, free heap %u, largest %u\n", netOk ? "ok" : "LOAD FAILED",
+  Serial.printf("%s: net %s, free heap %u, largest %u\n", BOARD_NAME, netOk ? "ok" : "LOAD FAILED",
                 ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-  auto c = [](uint8_t r, uint8_t g, uint8_t b) { return lcd.color565(r, g, b); };
+  auto c = [](uint8_t r, uint8_t g, uint8_t b) { return lgfx::color565(r, g, b); };
   C_FRAME = c(0x5b, 0x3a, 0x1f); C_FELT = c(0x1e, 0x5a, 0x38);
   C_PTA = c(0xdc, 0xc9, 0xa0);  C_PTB = c(0xa3, 0x39, 0x2b);
   C_ME = c(0xf3, 0xee, 0xe0);   C_MERIM = c(0x8d, 0x86, 0x76); C_MEIN = c(0xd6, 0xcf, 0xbd);
@@ -1170,11 +1162,15 @@ void setup() {
   randomSeed(esp_random());
   prefs.begin("bg", false);
   uint16_t cal[8];
-  if (prefs.getBytes("cal", cal, sizeof cal) == sizeof cal) lcd.setTouchCalibrate(cal);
+  if (prefs.getBytes("cal", cal, sizeof cal) == sizeof cal) touch_set_calibration(cal);
   else calibrate();
   if (!netOk) {
-    lcd.fillScreen(TFT_RED);
-    lcd.drawString("Net failed to load", W / 2, H / 2);
+    for (oy = 0; oy < H; oy += BAND) {  // a red screen saying so
+      cv.fillScreen(TFT_RED);
+      cv.setFont(&F_B21); cv.setTextColor(TFT_WHITE); cv.setTextDatum(middle_center);
+      cv.drawString("Net failed to load", W / 2, H / 2 - oy);
+      display_push(cv, oy, 0, W);
+    }
     return;
   }
   newGame();
@@ -1194,7 +1190,7 @@ void loop() {
   static int16_t sx[64], sy[64];
   static int ns = 0, idle = 0;
   int32_t x, y;
-  if (lcd.getTouch(&x, &y)) {
+  if (touch_get(&x, &y)) {
     if (ns < 64) { sx[ns] = x; sy[ns] = y; ns++; }
     idle = 0;
   } else if (ns && ++idle >= 3) {  // ~30 ms without contact = released
@@ -1205,8 +1201,7 @@ void loop() {
     if (netOk) tap(tx, ty);
     // Where the screen thinks you touched (gone at the next redraw).
     if (!menuOpen) {
-      lcd.drawFastHLine(tx - 6, ty, 13, TFT_WHITE);
-      lcd.drawFastVLine(tx, ty - 6, 13, TFT_WHITE);
+      display_cross(tx, ty);
     }
     ns = 0;
   }
@@ -1215,6 +1210,11 @@ void loop() {
     if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
+    else if (ch == 'i')  // info (USB-native boards lose the boot log)
+      Serial.printf("%s %dx%d: net %s, band sprite %s, free internal %u (largest %u), PSRAM %u\n", BOARD_NAME, W, H,
+                    netOk ? "ok" : "FAILED", cv.getBuffer() ? "ok" : "MISSING",
+                    heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                    heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     else if (ch == 'q') {
       // You're about to be gammoned (the CPU has 2 left, you have none off):
       // resigning a single should be refused, a gammon accepted.

@@ -66,3 +66,36 @@ class LGFX : public lgfx::LGFX_Device {
     setPanel(&panel);
   }
 };
+
+// ---- the board API the game uses (see include/board.h) ----
+#define BOARD_TOUCH_CALIBRATION 1  // resistive: calibrated on the board, stored in NVS
+#define BOARD_NET_PLACE NET_FLASH_SRAM
+#define BOARD_SPRITE_PSRAM false
+static LGFX lcd;
+
+static void display_begin() {
+  lcd.init();
+  lcd.setRotation(BOARD_ROTATION);
+  lcd.fillScreen(TFT_BLACK);
+  lcd.setBrightness(200);
+}
+static void display_push(LGFX_Sprite& band, int oy, int x0, int x1) {
+  lcd.setClipRect(x0, oy, x1 - x0, band.height());
+  band.pushSprite(&lcd, 0, oy);
+  lcd.clearClipRect();
+}
+static bool touch_get(int32_t* x, int32_t* y) { return lcd.getTouch(x, y); }
+static void display_cross(int x, int y) {
+  lcd.drawFastHLine(x - 6, y, 13, TFT_WHITE);
+  lcd.drawFastVLine(x, y - 6, 13, TFT_WHITE);
+}
+static void touch_calibrate(uint16_t cal[8]) {
+  lcd.fillScreen(TFT_BLACK);
+  lcd.setTextColor(TFT_WHITE);
+  lcd.setFont(&fonts::FreeSans9pt7b);
+  lcd.setTextDatum(middle_center);
+  lcd.drawString("Touch calibration", W / 2, H / 2 - 12);
+  lcd.drawString("Tap each corner arrow", W / 2, H / 2 + 12);
+  lcd.calibrateTouch(cal, TFT_YELLOW, TFT_BLACK, 20);
+}
+static void touch_set_calibration(uint16_t cal[8]) { lcd.setTouchCalibrate(cal); }
