@@ -589,7 +589,6 @@ static void fly(int x0, int y0, int x1, int y1, bool mine, float pace = 1) {
   float dist = sqrtf(float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
   // ~0.4-1.2 s, timed by distance in design (480x320) pixels so every screen size moves alike
   float f = SPEED_F[animSpeed];
-  if (dice[0] && dice[0] == dice[1]) f = 0;  // doubles (yours or the CPU's): up to four slides - skip them
   if (f == 0) {  // animation off: just show the checker gone from where it was
     redrawRegion(x0 - CR - 2, y0 - CR - 2, x0 + CR + 3, y0 + CR + 3);
     return;
