@@ -210,21 +210,39 @@ static void checker(int cx, int cy, bool mine, int r = CR) {
 }
 static void rect(int x, int y, int w, int h, uint16_t c) { cv.fillRect(x, y - oy, w, h, c); }
 static void dot(int x, int y, int r, uint16_t c) { cv.fillSmoothCircle(x, y - oy, r, c); }
-// An anti-aliased line (screen coordinates), drawn only for the slice inside
-// this band - a full-length smooth line costs its whole bounding box per band.
-static void edgeAA(int xa, int ya, int xb, int yb, uint16_t col) {
-  int y0 = max(min(ya, yb), oy - 2), y1 = min(max(ya, yb), oy + BAND + 2);
-  if (y0 > y1) return;
-  auto xAt = [&](int y) { return (int)lroundf(xa + (xb - xa) * float(y - ya) / float(yb - ya)); };
-  cv.drawSmoothLine(xAt(y0), y0 - oy, xAt(y1), y1 - oy, col);
+// The point triangle's shape, worked out once: for each row (0 = the base),
+// the fully covered span and the coverage of the edge pixel either side. A
+// point is then one horizontal line per row plus two blended edge pixels -
+// anti-aliased, and far cheaper than a filled triangle and two smooth lines.
+static int16_t triL[512], triR[512];  // first / last fully covered x in the row
+static uint8_t triAL[512], triAR[512];  // coverage (0..255) of the pixels at triL-1 / triR+1
+static void makeTriangle() {
+  const float apex = PW / 2.0f, right = PW - 1 + 1.0f;  // edges run from x = 0 and x = PW to the apex
+  for (int r = 0; r < PH && r < 512; r++) {
+    float t = (r + 0.5f) / PH;
+    float xl = apex * t, xr = right - (right - apex) * t;  // continuous edges at the row's centre
+    int l = (int)ceilf(xl), rr = (int)floorf(xr) - 1;
+    triL[r] = l; triR[r] = rr;
+    triAL[r] = (uint8_t)((l - xl) * 255);
+    triAR[r] = (uint8_t)((xr - (rr + 1)) * 255);
+  }
+}
+static uint16_t blend565(uint16_t fg, uint16_t bg, uint8_t a) {  // a/255 of fg over bg
+  int r = (((fg >> 11) * a) + ((bg >> 11) * (255 - a))) / 255;
+  int g = ((((fg >> 5) & 63) * a) + (((bg >> 5) & 63) * (255 - a))) / 255;
+  int b = (((fg & 31) * a) + ((bg & 31) * (255 - a))) / 255;
+  return r << 11 | g << 5 | b;
 }
 static void tri(int x0, bool top, uint16_t col) {
-  // Filled, then the two long edges re-drawn anti-aliased so they don't stair-step.
   if (x0 + PW <= clipX0 || x0 >= clipX1) return;
-  int by = top ? FT : FB - 1, ty = top ? FT + PH : FB - PH, tx = x0 + PW / 2;
-  cv.fillTriangle(x0, by - oy, x0 + PW - 1, by - oy, tx, ty - oy, col);
-  edgeAA(x0, by, tx, ty, col);
-  edgeAA(x0 + PW - 1, by, tx, ty, col);
+  // Rows of this triangle inside the band: screen y = FT + r (top) or FB - 1 - r.
+  for (int y = max(oy, top ? FT : FB - PH); y < min(oy + BAND, top ? FT + PH : FB); y++) {
+    int r = top ? y - FT : FB - 1 - y;
+    int yy = y - oy;
+    if (triR[r] >= triL[r]) cv.drawFastHLine(x0 + triL[r], yy, triR[r] - triL[r] + 1, col);
+    if (triAL[r]) cv.drawPixel(x0 + triL[r] - 1, yy, blend565(col, C_FELT, triAL[r]));
+    if (triAR[r]) cv.drawPixel(x0 + triR[r] + 1, yy, blend565(col, C_FELT, triAR[r]));
+  }
 }
 static void die(int x, int y, int v, bool cpu, bool used) {
   y -= oy;
@@ -1157,6 +1175,7 @@ void setup() {
   C_TEXT = c(0xe8, 0xe2, 0xd2); C_DIM = c(0x8a, 0x8a, 0x8a);
   C_GOOD = c(0x7f, 0xe0, 0x8a); C_BAD = c(0xff, 0x8a, 0x7a); C_STATUS = c(0x10, 0x10, 0x10);
   C_CPU = c(0xff, 0x9a, 0x3c);    C_HINT = c(0x4c, 0xd6, 0xf0);
+  makeTriangle();
   makeFace(faceMe, true);
   makeFace(faceOp, false);
   randomSeed(esp_random());

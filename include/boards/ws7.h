@@ -26,7 +26,7 @@ static const int W = 800, H = 480;
 
 #define BOARD_TOUCH_CALIBRATION 0
 #define BOARD_NET_PLACE NET_INTERNAL  // PSRAM board: layer 2 in SRAM, the rest in PSRAM
-#define BOARD_SPRITE_PSRAM true       // the 32 KB band sprite: internal SRAM is for the net
+#define BOARD_SPRITE_PSRAM false      // the 32 KB band sprite fits internal SRAM (drawing there is fast)
 
 // CH422G: not register based - each I2C "address" is a command.
 enum { WS7_CH422_SET = 0x24, WS7_CH422_OUT = 0x38 };
@@ -98,15 +98,24 @@ static void display_begin() {
 
 // Copy columns [x0, x1) of a rendered band to screen row oy. The sprite holds
 // RGB565 byte-swapped (LovyanGFX's SPI order); the RGB bus wants it native.
+// Ten rows at a time through a 16 KB buffer (small enough to leave internal
+// SRAM for the band sprite itself - drawing into PSRAM is several times slower).
 static void display_push(LGFX_Sprite& band, int oy, int x0, int x1) {
-  static uint16_t buf[W * 20];
+  const int ROWS = 10;
+  static uint16_t buf[W * 10];
   int h = band.height(), w = x1 - x0;
   if (oy + h > H) h = H - oy;
   if (w <= 0 || h <= 0) return;
   const uint16_t* src = (const uint16_t*)band.getBuffer();
-  for (int r = 0; r < h; r++)
-    for (int i = 0; i < w; i++) buf[r * w + i] = __builtin_bswap16(src[r * band.width() + x0 + i]);
-  esp_lcd_panel_draw_bitmap(ws7_panel, x0, oy, x1, oy + h, buf);
+  for (int r0 = 0; r0 < h; r0 += ROWS) {
+    int n = min(ROWS, h - r0);
+    for (int r = 0; r < n; r++) {
+      const uint16_t* s = src + (r0 + r) * band.width() + x0;
+      uint16_t* d = buf + r * w;
+      for (int i = 0; i < w; i++) d[i] = __builtin_bswap16(s[i]);
+    }
+    esp_lcd_panel_draw_bitmap(ws7_panel, x0, oy + r0, x1, oy + r0 + n, buf);
+  }
 }
 
 static bool ws7_gt_read(uint16_t reg, uint8_t* buf, int n) {
