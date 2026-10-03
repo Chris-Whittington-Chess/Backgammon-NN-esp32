@@ -303,13 +303,18 @@ static void drawMarks(const BgBoard& a, const BgBoard& b, bool mine, uint16_t co
   if (b.bar[s] < a.bar[s]) { int y = mine ? MIDY + BAROFF : MIDY - BAROFF; cv.drawCircle(BARX + BARW / 2, y - oy, ss(5), col); }
 }
 
-// ---- menu (2 x 4 buttons over the board) ----
-static const int MW = ss(300), MX = (W - MW) / 2, MY = SB, MH = ss(258), BW = ss(136), BH = ss(46);
+// ---- menu (2 x 5 buttons over the board) ----
+// BW / BH are also the dialogs' button size; the menu's rows are as tall as fit.
+static const int MW = ss(300), MX = (W - MW) / 2, MY = SB, BW = ss(136), BH = ss(46);
 static const int BGAP = ss(8);  // between buttons
+static const int MROWS = 5;
+static const int MBH = (H - SB - ss(36) - ss(10)) / MROWS - BGAP < BH ? (H - SB - ss(36) - ss(10)) / MROWS - BGAP : BH;
+static const int MH = ss(36) + MROWS * (MBH + BGAP) + ss(4);
 // Tapping outside the panel (or the menu icon) also closes it.
-static const int NMENU = 8;
-static const char* const MENU[NMENU] = {"Undo step", "New game", "Undo move", "Hint",
-                                        "Resign", "Reset score", "Calibrate touch", "Claim win"};
+enum MenuItem { M_UNDO_STEP, M_NEW_GAME, M_UNDO_MOVE, M_HINT, M_RESIGN, M_CLAIM, M_SPEED, M_RESET,
+                M_CALIBRATE, M_CLOSE, NMENU };
+static const char* const MENU[NMENU] = {"Undo step", "New game", "Undo move", "Hint", "Resign",
+                                        "Claim win", "Speed", "Reset score", "Calibrate", "Close"};
 static bool canTakeBack() {
   if (phase == DONE) return true;
   if (phase == MOVE) return memcmp(&g, &turnStart, sizeof g) || nhist >= 2;
@@ -317,11 +322,11 @@ static bool canTakeBack() {
   return phase == ROLL && nhist >= 1;
 }
 static bool menuEnabled(int i) {
-  if (i == 0) return (phase == MOVE || phase == DONE) && nsteps > 0;
-  if (i == 2) return canTakeBack();
-  if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
-  // item 6: Calibrate touch on resistive boards, Speed on capacitive ones
-  if (i == 4 || i == 7) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
+  if (i == M_UNDO_STEP) return (phase == MOVE || phase == DONE) && nsteps > 0;
+  if (i == M_UNDO_MOVE) return canTakeBack();
+  if (i == M_HINT) return phase == MOVE || phase == ROLL;  // move hint / cube advice
+  if (i == M_RESIGN || i == M_CLAIM) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
+  if (i == M_CALIBRATE) return BOARD_TOUCH_CALIBRATION;  // capacitive boards don't calibrate
   return true;
 }
 static int buttonX(int i) { return MX + ss(10) + (i % 2) * (BW + BGAP); }
@@ -390,7 +395,7 @@ static void drawCube() {
   cv.setTextColor(TFT_BLACK);
   number(cubeVal == 1 ? 64 : cubeVal, x + CUBE_S / 2, y + CUBE_S / 2 + 1);
 }
-static int buttonY(int i) { return MY + ss(36) + (i / 2) * (BH + BGAP); }
+static int buttonY(int i) { return MY + ss(36) + (i / 2) * (MBH + BGAP); }
 
 static void drawMenu() {
   if (MY + MH < oy || MY > oy + BAND) return;
@@ -403,16 +408,17 @@ static void drawMenu() {
   cv.setFont(&F_S21);
   for (int i = 0; i < NMENU; i++) {
     bool on = menuEnabled(i);
-    cv.fillRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, ss(8), on ? C_FELT : C_BAR);
-    cv.drawRoundRect(buttonX(i), buttonY(i) - oy, BW, BH, ss(8), on ? C_SEL : C_DIM);
+    cv.fillRoundRect(buttonX(i), buttonY(i) - oy, BW, MBH, ss(8), on ? C_FELT : C_BAR);
+    cv.drawRoundRect(buttonX(i), buttonY(i) - oy, BW, MBH, ss(8), on ? C_SEL : C_DIM);
     cv.setTextColor(on ? C_TEXT : C_DIM);
-    if (i == 6) {  // two lines
+    if (i == M_SPEED || i == M_CALIBRATE) {  // two lines
+      int cx = buttonX(i) + BW / 2, cy = buttonY(i) + MBH / 2, d = MBH / 4;
       cv.setFont(&F_S16);
-      text(BOARD_TOUCH_CALIBRATION ? "Calibrate" : "Speed", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - ss(9));
-      if (!BOARD_TOUCH_CALIBRATION) cv.setTextColor(C_SEL);
-      text(BOARD_TOUCH_CALIBRATION ? "touch" : SPEED_N[animSpeed], buttonX(i) + BW / 2, buttonY(i) + BH / 2 + ss(10));
+      text(i == M_SPEED ? "Speed" : "Calibrate", cx, cy - d);
+      if (i == M_SPEED) cv.setTextColor(C_SEL);
+      text(i == M_SPEED ? SPEED_N[animSpeed] : "touch", cx, cy + d);
       cv.setFont(&F_S21);
-    } else text(MENU[i], buttonX(i) + BW / 2, buttonY(i) + BH / 2);
+    } else text(MENU[i], buttonX(i) + BW / 2, buttonY(i) + MBH / 2);
   }
 }
 
@@ -977,27 +983,26 @@ static void settleOffer(int level) {
 static void menuTap(int x, int y) {
   int hit = -1;
   for (int i = 0; i < NMENU; i++)
-    if (x >= buttonX(i) && x < buttonX(i) + BW && y >= buttonY(i) && y < buttonY(i) + BH) hit = i;
+    if (x >= buttonX(i) && x < buttonX(i) + BW && y >= buttonY(i) && y < buttonY(i) + MBH) hit = i;
   bool inside = x >= MX && x < MX + MW && y >= MY && y < MY + MH;
   if (hit < 0) { if (!inside) { menuOpen = false; draw(); } return; }
   if (!menuEnabled(hit)) return;
   menuOpen = false;
   switch (hit) {
-    case 0: undoStep(); break;
-    case 1: newGame(); break;
-    case 2: takeBack(); break;
-    case 3: hint(); break;
-    case 4: openSettle(false); break;
-    case 5: scoreYou = scoreCpu = 0; snprintf(msg, sizeof msg, "Score reset"); break;
-    case 6:
-      if (BOARD_TOUCH_CALIBRATION) calibrate();
-      else {  // cycle the speed; the menu stays open to show it
-        animSpeed = (animSpeed + 1) % 4;
-        prefs.putUChar("speed", animSpeed);
-        menuOpen = true;
-      }
+    case M_UNDO_STEP: undoStep(); break;
+    case M_NEW_GAME: newGame(); break;
+    case M_UNDO_MOVE: takeBack(); break;
+    case M_HINT: hint(); break;
+    case M_RESIGN: openSettle(false); break;
+    case M_CLAIM: openSettle(true); break;
+    case M_SPEED:  // cycle the speed; the menu stays open to show it
+      animSpeed = (animSpeed + 1) % 4;
+      prefs.putUChar("speed", animSpeed);
+      menuOpen = true;
       break;
-    case 7: openSettle(true); break;
+    case M_RESET: scoreYou = scoreCpu = 0; snprintf(msg, sizeof msg, "Score reset"); break;
+    case M_CALIBRATE: calibrate(); break;
+    case M_CLOSE: break;
   }
   draw();
 }

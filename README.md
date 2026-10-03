@@ -100,9 +100,11 @@ the start of your turn (or with the CPU on roll once your move is done, or you c
 | Undo move | Undo your whole turn so far; if you haven't moved (or the CPU has replied), go back to the start of your previous turn, undoing the CPU's move and any cube action |
 | Hint | Your turn: the best move in cyan (rings = from, dots = to). Before rolling: cube advice |
 | Resign | Offer a single, gammon or backgammon (times the cube), or cancel |
-| Reset score | Score back to 0-0 |
-| Calibrate touch | Re-run the 4-corner touch calibration |
 | Claim win | Ask the CPU to concede a single, gammon or backgammon (times the cube), or cancel |
+| Speed | Animation speed: Slow / Normal / Fast / Off (tap to cycle; remembered on the board). Default Slow on the 4-inch, Normal on the 7-inch |
+| Reset score | Score back to 0-0 |
+| Calibrate touch | Re-run the 4-corner touch calibration (resistive screens only) |
+| Close | Close the menu |
 
 When a game ends (played out, dropped or resigned) the status bar shows the result and score
 (you-CPU), and NEW GAME blinks in the tray: tap it to start the next game. Touch calibration also runs on first boot and is stored in NVS.
