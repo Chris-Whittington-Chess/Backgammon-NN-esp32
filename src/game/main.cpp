@@ -72,6 +72,7 @@ static Step steps[8];
 static int nsteps;
 static BgSub subs[64];
 static int nsubs, sel = -1;     // sel: 1..24, 25 = bar
+static bool selAuto;           // the game picked sel (auto-select / the checker just moved), not you
 static bool cpuMarks;           // show the CPU's last move
 static int resumePhase;         // where a refused resignation returns to
 static int cpuResignLevel;      // what the CPU offered (1 single, 2 gammon, 3 backgammon)
@@ -733,7 +734,7 @@ static void autoSelect() {
   if (phase != MOVE || sel > 0) return;
   int only = -1, n = 0;
   for (int p = 1; p <= 25; p++) if (canMoveFrom(p)) { only = p; n++; }
-  if (n == 1) { sel = only; computePaths(); }
+  if (n == 1) { sel = only; selAuto = true; computePaths(); }
 }
 
 // Begin your turn with d1-d2. push: record it in the take-back history.
@@ -852,7 +853,7 @@ static void applyPath(const Path& p) {
   // doubles), so its next targets are lit; otherwise the only movable checker.
   if (p.to > 0 && canMoveFrom(p.to)) {
     uint32_t t0 = micros();
-    sel = p.to;
+    sel = p.to; selAuto = true;
     computePaths();
     if (touchLog) Serial.printf("paths for %d: %d in %u us\n", sel, npaths, micros() - t0);
   } else autoSelect();
@@ -1113,7 +1114,10 @@ static void tap(int x, int y) {
   int tgt = -1, src = -1;
   bool sIsTarget = false;
   for (int i = 0; i < npaths; i++) sIsTarget |= paths[i].to == s;
-  bool switching = s > 0 && s != sel && canMoveFrom(s) && !sIsTarget;  // picking another checker
+  // Picking another checker: a movable one that isn't a target - or, when the
+  // game chose the current selection, any movable one (with doubles the moved
+  // checker's targets often include your other points).
+  bool switching = s > 0 && s != sel && canMoveFrom(s) && (!sIsTarget || selAuto);
   if (sel > 0 && !switching) {
     int best = ss(28) * ss(28);
     for (int i = 0; i < npaths; i++) {
@@ -1158,7 +1162,7 @@ static void tap(int x, int y) {
   }
   if (src > 0 && src == sel) { draw(); return; }  // the selected checker again: keep it (no toggle)
   if (src > 0 && src != sel) {
-    sel = src;
+    sel = src; selAuto = false;
     uint32_t tp = micros();
     computePaths();
     if (touchLog) Serial.printf("paths for %d: %d in %u us\n", sel, npaths, micros() - tp);
