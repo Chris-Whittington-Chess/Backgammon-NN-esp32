@@ -148,7 +148,17 @@ board lives in one header under `include/boards/`, picked by a build flag:
 |---|---|---|
 | `e32r40t` | 4.0" ESP32-32E display, ST7796S 480x320, XPT2046 touch | reference board |
 | `e32r40t_320x240` | the same board, drawing the 320x240 layout in its top-left corner | test of the small layout |
+| `ws7` | Waveshare ESP32-S3-Touch-LCD-7: ESP32-S3, 8 MB PSRAM, 800x480 RGB panel, GT911 capacitive touch | tested |
 | `cyd28` | 2.8" "Cheap Yellow Display" ESP32-2432S028R, ILI9341 320x240, XPT2046 touch | example, untested on hardware |
+
+The game reaches the hardware only through a few functions each board header provides:
+`display_begin()`, `display_push()` (put a rendered 20-row band on screen), `display_cross()`,
+`touch_get()`, and `touch_calibrate()` / `touch_set_calibration()` for resistive screens. Boards
+LovyanGFX drives directly (the SPI panels) implement them in a few lines; `ws7` drives its RGB
+panel through ESP-IDF 5's `esp_lcd` driver (with bounce buffers, so flash reads don't disturb the
+picture) and builds on the pioarduino platform, while the classic-ESP32 boards stay on
+PlatformIO's espressif32 7.1.3 (arduino-esp32 2.0.17). A board header also says where the
+network goes (`BOARD_NET_PLACE`: flash plus SRAM without PSRAM, PSRAM plus SRAM with it).
 
 **A new board with a 480x320 or 320x240 screen**
 
@@ -172,7 +182,7 @@ heights with `H`, and checkers, dice, text and menus with the smaller of the two
 are always round and everything is drawn in code at the new size (there are no images). Two
 compile-time checks stop a layout whose checkers wouldn't fit. Fonts are the one thing made in
 advance: add the sizes to `SIZES` in `tools/make_fonts.py` and re-run it (16 / 21 px suit
-480x320, 11 / 14 px suit 320x240).
+480x320, 11 / 14 px suit 320x240, 24 / 32 px suit 800x480).
 
 **What a board needs**
 
