@@ -576,10 +576,11 @@ static int countAt(const BgBoard& b, bool mine, int p) {
 }
 
 // Slide a checker from (x0,y0) to (x1,y1), eased, ~120-400 ms by distance.
-static void fly(int x0, int y0, int x1, int y1, bool mine) {
+// pace scales the duration: 1 for your moves, less for the CPU's (you're waiting on it).
+static void fly(int x0, int y0, int x1, int y1, bool mine, float pace = 1) {
   float dist = sqrtf(float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
   // ~0.4-1.2 s, timed by distance in design (480x320) pixels so every screen size moves alike
-  uint32_t dur = 400 + (uint32_t)(dist / LSS * 1.8f), t0 = millis();
+  uint32_t dur = (uint32_t)((400 + dist / LSS * 1.8f) * pace), t0 = millis();
   flying = true; flyMine = mine;
   profBands = profDrawUs = profPushUs = 0;
   int px = x0, py = y0, frames = 0;
@@ -606,7 +607,8 @@ static void animateStep(const BgBoard& a, const BgBoard& b, int from, int to, bo
   else mid.pts[from] += mine ? -1 : 1;
   slotXY(mine, to, countAt(mid, mine, to), x1, y1);
   g = mid;
-  fly(x0, y0, x1, y1, mine);
+  const float pace = mine ? 1.0f : 0.6f;  // the CPU's moves go quicker
+  fly(x0, y0, x1, y1, mine, pace);
   int opp = mine ? 1 : 0;
   const int R = CR + 3;
   if (b.bar[opp] > a.bar[opp]) {  // hit: the blot flies to the bar
@@ -615,7 +617,7 @@ static void animateStep(const BgBoard& a, const BgBoard& b, int from, int to, bo
     g = m2;
     int bx, by;
     slotXY(!mine, 25, b.bar[opp] - 1, bx, by);
-    fly(x1, y1, bx, by, !mine);
+    fly(x1, y1, bx, by, !mine, pace);
     g = b;
     redrawRegion(bx - R, by - R, bx + R, by + R);
   }
@@ -697,7 +699,7 @@ static void cpuTurn(int d1, int d2, bool full = true) {
     for (int i = 0; i < len; i++) {
       const BgSub& s = cpuSteps[i];
       auto mapPt = [](int p) { return p == 25 || p == 0 ? p : 25 - p; };
-      if (i) delay(200);  // a beat between the CPU's checkers
+      if (i) delay(100);  // a beat between the CPU's checkers
       animateStep(bg_swap(cur), bg_swap(s.result), mapPt(s.from), mapPt(s.to), false);
       cur = s.result;
     }
