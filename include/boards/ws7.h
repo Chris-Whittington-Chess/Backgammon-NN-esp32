@@ -25,6 +25,7 @@
 static const int W = 800, H = 480;
 
 #define BOARD_TOUCH_CALIBRATION 0
+#define BOARD_ANIM_DEFAULT 1  // Normal; changeable in the menu (Speed)
 #define BOARD_NET_PLACE NET_INTERNAL  // PSRAM board: layer 2 in SRAM, the rest in PSRAM
 #define BOARD_SPRITE_PSRAM false      // the 32 KB band sprite fits internal SRAM (drawing there is fast)
 

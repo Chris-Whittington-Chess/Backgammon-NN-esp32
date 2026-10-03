@@ -82,7 +82,12 @@ static bool menuOpen;
 static bool flying, flyMine, tumbling;  // animation: a checker in flight / dice rolling
 static bool blinkOn = true;             // ROLL / waiting prompts wink on and off
 static int flyX, flyY;
-static bool touchLog;  // serial 'L': log every touch, its phase change and handling time
+static bool touchLog;
+// Animation speed (menu on boards without touch calibration, kept in NVS):
+// a factor on slide and tumble times; Off skips the animation.
+static const float SPEED_F[4] = {1.0f, 0.5f, 0.25f, 0.0f};
+static const char* const SPEED_N[4] = {"Slow", "Normal", "Fast", "Off"};
+static int animSpeed = BOARD_ANIM_DEFAULT;  // serial 'L': log every touch, its phase change and handling time
 // Start of one of your turns, for take-back (cube state included).
 struct Snap { BgBoard b; int8_t d1, d2; int16_t cubeVal; int8_t cubeOwn; };
 static Snap hist[32];
@@ -314,7 +319,7 @@ static bool menuEnabled(int i) {
   if (i == 0) return (phase == MOVE || phase == DONE) && nsteps > 0;
   if (i == 2) return canTakeBack();
   if (i == 3) return phase == MOVE || phase == ROLL;  // move hint / cube advice
-  if (i == 6) return BOARD_TOUCH_CALIBRATION;         // capacitive boards don't calibrate
+  // item 6: Calibrate touch on resistive boards, Speed on capacitive ones
   if (i == 4 || i == 7) return phase == ROLL || phase == MOVE || phase == PASS || phase == DONE;
   return true;
 }
@@ -402,8 +407,9 @@ static void drawMenu() {
     cv.setTextColor(on ? C_TEXT : C_DIM);
     if (i == 6) {  // two lines
       cv.setFont(&F_S16);
-      text("Calibrate", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - ss(9));
-      text("touch", buttonX(i) + BW / 2, buttonY(i) + BH / 2 + ss(10));
+      text(BOARD_TOUCH_CALIBRATION ? "Calibrate" : "Speed", buttonX(i) + BW / 2, buttonY(i) + BH / 2 - ss(9));
+      if (!BOARD_TOUCH_CALIBRATION) cv.setTextColor(C_SEL);
+      text(BOARD_TOUCH_CALIBRATION ? "touch" : SPEED_N[animSpeed], buttonX(i) + BW / 2, buttonY(i) + BH / 2 + ss(10));
       cv.setFont(&F_S21);
     } else text(MENU[i], buttonX(i) + BW / 2, buttonY(i) + BH / 2);
   }
@@ -581,7 +587,12 @@ static int countAt(const BgBoard& b, bool mine, int p) {
 static void fly(int x0, int y0, int x1, int y1, bool mine, float pace = 1) {
   float dist = sqrtf(float((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)));
   // ~0.4-1.2 s, timed by distance in design (480x320) pixels so every screen size moves alike
-  uint32_t dur = (uint32_t)((400 + dist / LSS * 1.8f) * pace), t0 = millis();
+  float f = SPEED_F[animSpeed];
+  if (f == 0) {  // animation off: just show the checker gone from where it was
+    redrawRegion(x0 - CR - 2, y0 - CR - 2, x0 + CR + 3, y0 + CR + 3);
+    return;
+  }
+  uint32_t dur = (uint32_t)((400 + dist / LSS * 1.8f) * pace * f), t0 = millis();
   flying = true; flyMine = mine;
   profBands = profDrawUs = profPushUs = 0;
   int px = x0, py = y0, frames = 0;
@@ -630,11 +641,12 @@ static void animateStep(const BgBoard& a, const BgBoard& b, int from, int to, bo
 static uint32_t tapAt;  // when the last tap was handled (handover latency log)
 static void tumble(int d1, int d2, bool cpu) {
   if (cpu) Serial.printf("dice start %u ms after the tap\n", millis() - tapAt);
+  float f = SPEED_F[animSpeed] / SPEED_F[1];  // Normal = ~0.4 s
   tumbling = true; cpuDice = cpu;
-  for (int i = 0; i < 8; i++) {  // slowing down, ~0.4 s in all: a roll shouldn't feel like a wait
+  for (int i = 0; i < (f > 0 ? 8 : 0); i++) {  // slowing down, ~0.4 s in all: a roll shouldn't feel like a wait
     dice[0] = random(1, 7); dice[1] = random(1, 7);
     redrawRegion(TRX, MIDY - TAP_H, W, MIDY + TAP_D);
-    delay(25 + i * 6);
+    delay((uint32_t)((25 + i * 6) * f));
   }
   dice[0] = d1; dice[1] = d2;
   tumbling = false;
@@ -701,7 +713,7 @@ static void cpuTurn(int d1, int d2, bool full = true) {
     for (int i = 0; i < len; i++) {
       const BgSub& s = cpuSteps[i];
       auto mapPt = [](int p) { return p == 25 || p == 0 ? p : 25 - p; };
-      if (i) delay(100);  // a beat between the CPU's checkers
+      if (i) delay((uint32_t)(200 * SPEED_F[animSpeed]));  // a beat between the CPU's checkers
       animateStep(bg_swap(cur), bg_swap(s.result), mapPt(s.from), mapPt(s.to), false);
       cur = s.result;
     }
@@ -834,8 +846,16 @@ static void applyPath(const Path& p) {
   if (int r = bg_result(g)) { gameOver(r, true); return; }
   sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
-  if (!nsubs) { phase = DONE; snprintf(msg, sizeof msg, "Tap the dice to finish"); }
-  else { snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]); autoSelect(); }
+  if (!nsubs) { phase = DONE; snprintf(msg, sizeof msg, "Tap the dice to finish"); return; }
+  snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
+  // Keep the checker you just moved selected if it can go on (common with
+  // doubles), so its next targets are lit; otherwise the only movable checker.
+  if (p.to > 0 && canMoveFrom(p.to)) {
+    uint32_t t0 = micros();
+    sel = p.to;
+    computePaths();
+    if (touchLog) Serial.printf("paths for %d: %d in %u us\n", sel, npaths, micros() - t0);
+  } else autoSelect();
 }
 
 // ---- menu actions ----
@@ -968,7 +988,14 @@ static void menuTap(int x, int y) {
     case 3: hint(); break;
     case 4: openSettle(false); break;
     case 5: scoreYou = scoreCpu = 0; snprintf(msg, sizeof msg, "Score reset"); break;
-    case 6: calibrate(); break;
+    case 6:
+      if (BOARD_TOUCH_CALIBRATION) calibrate();
+      else {  // cycle the speed; the menu stays open to show it
+        animSpeed = (animSpeed + 1) % 4;
+        prefs.putUChar("speed", animSpeed);
+        menuOpen = true;
+      }
+      break;
     case 7: openSettle(true); break;
   }
   draw();
@@ -1108,28 +1135,28 @@ static void tap(int x, int y) {
                 tgt >= 0 ? paths[tgt].to : -1, src, sel);
   if (tgt >= 0) { applyPath(paths[tgt]); draw(); return; }
   // Nothing selected and a destination tapped: if exactly one of your checkers
-  // can get there (always so when entering from the bar), just play it.
+  // can get there with one die (always so when entering from the bar), just
+  // play it. One-die moves are already in subs, so this costs nothing - a
+  // search through every checker's multi-die chains was slow with doubles.
   if (sel < 0 && src < 0 && s >= 0) {
-    int found = -1;
-    Path move;
-    for (int p = 1; p <= 25 && found != -2; p++) {
-      if (!canMoveFrom(p)) continue;
-      sel = p;
-      computePaths();
-      for (int i = 0; i < npaths; i++)
-        if (paths[i].to == s) {
-          if (found < 0) { found = p; move = paths[i]; }
-          else if (found != p) found = -2;  // more than one checker could go there
-          break;
-        }
+    int found = -1, from = -1;
+    for (int i = 0; i < nsubs && found != -2; i++) {
+      if (subs[i].to != s) continue;
+      if (found < 0) { found = i; from = subs[i].from; }
+      else if (subs[i].from != from) found = -2;  // more than one checker could go there
     }
-    sel = -1; npaths = 0;
-    if (found > 0) { applyPath(move); draw(); return; }
+    if (found >= 0) {
+      Path move;
+      move.n = 1; move.to = s; move.step[0] = subs[found];
+      applyPath(move); draw(); return;
+    }
     if (found == -2) { snprintf(msg, sizeof msg, "Tap the checker to move first"); draw(); return; }
   }
   if (src > 0 && src != sel) {
     sel = src;
+    uint32_t tp = micros();
     computePaths();
+    if (touchLog) Serial.printf("paths for %d: %d in %u us\n", sel, npaths, micros() - tp);
     snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
   } else {
     bool mine = s == 25 ? g.bar[0] > 0 : s > 0 && g.pts[s] > 0;
@@ -1222,6 +1249,7 @@ void setup() {
   makeFace(faceOp, false);
   randomSeed(esp_random());
   prefs.begin("bg", false);
+  animSpeed = prefs.getUChar("speed", BOARD_ANIM_DEFAULT) % 4;
   uint16_t cal[8];
   if (prefs.getBytes("cal", cal, sizeof cal) == sizeof cal) touch_set_calibration(cal);
   else calibrate();
@@ -1302,6 +1330,10 @@ void loop() {
                     netOk ? "ok" : "FAILED", cv.getBuffer() ? "ok" : "MISSING",
                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                     heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    else if (ch == 'o') {  // test: start your turn now with chosen dice, e.g. 'o 3 3'
+      int a = Serial.parseInt(), b = Serial.parseInt();
+      startMove(a, b); draw();
+    }
     else if (ch == 'e') {
       // Bar-entry test: you have one on the bar; the CPU holds 19-23, so with 6-1 only
       // the 1 enters (on your 24-point).

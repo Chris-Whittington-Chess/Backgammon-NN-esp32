@@ -74,6 +74,7 @@ class LGFX : public lgfx::LGFX_Device {
 #define BOARD_TOUCH_CALIBRATION 1  // resistive: calibrated on the board, stored in NVS
 #define BOARD_NET_PLACE NET_FLASH_SRAM
 #define BOARD_SPRITE_PSRAM false
+#define BOARD_ANIM_DEFAULT 0  // Slow: the pace tuned on the 4in board (no speed menu: it calibrates)
 static LGFX lcd;
 
 static void display_begin() {
