@@ -1090,6 +1090,26 @@ static void tap(int x, int y) {
   Serial.printf("tap %d,%d -> spot %d, target %d, source %d (sel %d)\n", x, y, s,
                 tgt >= 0 ? paths[tgt].to : -1, src, sel);
   if (tgt >= 0) { applyPath(paths[tgt]); draw(); return; }
+  // Nothing selected and a destination tapped: if exactly one of your checkers
+  // can get there (always so when entering from the bar), just play it.
+  if (sel < 0 && src < 0 && s >= 0) {
+    int found = -1;
+    Path move;
+    for (int p = 1; p <= 25 && found != -2; p++) {
+      if (!canMoveFrom(p)) continue;
+      sel = p;
+      computePaths();
+      for (int i = 0; i < npaths; i++)
+        if (paths[i].to == s) {
+          if (found < 0) { found = p; move = paths[i]; }
+          else if (found != p) found = -2;  // more than one checker could go there
+          break;
+        }
+    }
+    sel = -1; npaths = 0;
+    if (found > 0) { applyPath(move); draw(); return; }
+    if (found == -2) { snprintf(msg, sizeof msg, "Tap the checker to move first"); draw(); return; }
+  }
   if (src > 0 && src != sel) {
     sel = src;
     computePaths();
@@ -1264,6 +1284,20 @@ void loop() {
                     netOk ? "ok" : "FAILED", cv.getBuffer() ? "ok" : "MISSING",
                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                     heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    else if (ch == 'e') {
+      // Bar-entry test: you have one on the bar; the CPU holds 19-23, so with 6-1 only
+      // the 1 enters (on your 24-point).
+      memset(&g, 0, sizeof g);
+      g.bar[0] = 1; g.pts[6] = 14;
+      for (int q = 19; q <= 23; q++) g.pts[q] = -2;
+      g.pts[12] = -5;
+      cubeVal = 1; cubeOwn = 0; nhist = 0;
+      cpuMarks = hintMarks = false;
+      setEval();
+      startMove(6, 1);
+      draw();
+      Serial.printf("entry test: bar at %d,%d; 24-point at %d,%d\n", BARX + BARW / 2, MIDY + BAROFF, pointCX(24), stackY(true, 0));
+    }
     else if (ch == 'q') {
       // You're about to be gammoned (the CPU has 2 left, you have none off):
       // resigning a single should be refused, a gammon accepted.
