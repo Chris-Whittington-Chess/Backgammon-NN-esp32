@@ -713,6 +713,15 @@ static void cpuTurn(int d1, int d2, bool full = true) {
   setEval();
 }
 
+// When only one of your checkers can move (always so with one on the bar),
+// select it, so its destinations light up without a tap.
+static void autoSelect() {
+  if (phase != MOVE || sel > 0) return;
+  int only = -1, n = 0;
+  for (int p = 1; p <= 25; p++) if (canMoveFrom(p)) { only = p; n++; }
+  if (n == 1) { sel = only; computePaths(); }
+}
+
 // Begin your turn with d1-d2. push: record it in the take-back history.
 static void startMove(int d1, int d2, bool push = true) {
   if (push) {
@@ -729,7 +738,7 @@ static void startMove(int d1, int d2, bool push = true) {
   sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
   if (!nsubs) { phase = PASS; snprintf(msg, sizeof msg, "No legal move: tap the dice"); }
-  else { phase = MOVE; snprintf(msg, sizeof msg, "Your move: %d-%d", d1, d2); }
+  else { phase = MOVE; snprintf(msg, sizeof msg, "Your move: %d-%d", d1, d2); autoSelect(); }
 }
 
 static void newGame() {
@@ -819,7 +828,7 @@ static void applyPath(const Path& p) {
   sel = -1; npaths = 0;
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
   if (!nsubs) { phase = DONE; snprintf(msg, sizeof msg, "Tap the dice to finish"); }
-  else snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]);
+  else { snprintf(msg, sizeof msg, "Your move: %d-%d", dice[0], dice[1]); autoSelect(); }
 }
 
 // ---- menu actions ----
@@ -832,6 +841,7 @@ static void undoStep() {
   nsubs = bg_next_submoves(g, rem, nrem, subs, 64);
   phase = MOVE;
   snprintf(msg, sizeof msg, "Step undone: %d to play", nrem);
+  autoSelect();
 }
 
 static void takeBack() {
@@ -1120,6 +1130,7 @@ static void tap(int x, int y) {
     else if (sel > 0 && s >= 0) snprintf(msg, sizeof msg, "Can't move there");
     sel = -1; npaths = 0;
   }
+  autoSelect();
   draw();
 }
 
