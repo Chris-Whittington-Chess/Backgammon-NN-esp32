@@ -750,8 +750,13 @@ static void newGame() {
   int a, b;
   do { a = random(1, 7); b = random(1, 7); } while (a == b);
   if (a > b) {
-    snprintf(msg, sizeof msg, "You %d, CPU %d: you start", a, b);
+    // Show the fresh board, then the opening roll tumbling (the CPU's opening
+    // tumbles in cpuTurn).
+    snprintf(msg, sizeof msg, "New game: opening roll...");
+    phase = ROLL; sel = -1; npaths = 0; nsubs = 0;
     setEval();
+    draw();
+    tumble(a, b, false);
     startMove(a, b);
     snprintf(msg, sizeof msg, "You start: play %d-%d", a, b);
   } else {
