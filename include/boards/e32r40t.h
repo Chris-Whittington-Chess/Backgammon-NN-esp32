@@ -104,3 +104,4 @@ static void touch_calibrate(uint16_t cal[8]) {
   lcd.calibrateTouch(cal, TFT_YELLOW, TFT_BLACK, 24);
 }
 static void touch_set_calibration(uint16_t cal[8]) { lcd.setTouchCalibrate(cal); }
+static void touch_debug(bool on) {}  // raw touch logging: nothing extra on this board

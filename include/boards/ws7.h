@@ -137,6 +137,8 @@ static bool ws7_gt_read(uint16_t reg, uint8_t* buf, int n) {
 // the last "down" one is read afterwards - the board would think the finger
 // was still there and miss the next tap. So: no fresh report for 60 ms while
 // down means the finger has gone.
+static bool ws7_raw;  // serial 'R': log every GT911 report
+static void touch_debug(bool on) { ws7_raw = on; }
 static bool touch_get(int32_t* x, int32_t* y) {
   static bool down;
   static int32_t lx, ly;
@@ -151,9 +153,11 @@ static bool touch_get(int32_t* x, int32_t* y) {
     Wire.beginTransmission(ws7_gt911);
     Wire.write(0x81); Wire.write(0x4E); Wire.write(0);
     Wire.endTransmission();
+    if (ws7_raw) Serial.printf("%u gt st=%02x %s %d,%d (gap %u)\n", millis(), st, down ? "down" : "up", lx, ly, millis() - lastReport);
     lastReport = millis();
   } else if (down && millis() - lastReport > 60) {
     down = false;  // reports stopped: the finger lifted while we weren't looking
+    if (ws7_raw) Serial.printf("%u gt timeout -> up\n", millis());
   }
   *x = lx; *y = ly;
   return down;

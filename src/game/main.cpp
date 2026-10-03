@@ -1222,7 +1222,7 @@ void loop() {
       uint32_t t0 = millis();
       Phase before = phase;
       if (netOk) tap(x, y);
-      if (touchLog) Serial.printf("touch %d,%d phase %d -> %d, handled in %u ms\n", x, y, before, phase, millis() - t0);
+      if (touchLog) Serial.printf("%u touch %d,%d phase %d -> %d, handled in %u ms\n", t0, x, y, before, phase, millis() - t0);
       if (!menuOpen) display_cross(x, y);
     } else if (!down) held = false;
   } else if (down) {
@@ -1248,6 +1248,7 @@ void loop() {
     if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
+    else if (ch == 'R') { static bool on; on = !on; touch_debug(on); touchLog = on; Serial.printf("raw touch log %s\n", on ? "on" : "off"); }
     else if (ch == 'L') { touchLog = !touchLog; Serial.printf("touch log %s\n", touchLog ? "on" : "off"); }
     else if (ch == 'T') {  // touch test: print the raw readings for 10 s
       uint32_t t0 = millis(); bool was = false;
