@@ -81,6 +81,7 @@ static bool menuOpen;
 static bool flying, flyMine, tumbling;  // animation: a checker in flight / dice rolling
 static bool blinkOn = true;             // ROLL / waiting prompts wink on and off
 static int flyX, flyY;
+static bool touchLog;  // serial 'L': log every touch, its phase change and handling time
 // Start of one of your turns, for take-back (cube state included).
 struct Snap { BgBoard b; int8_t d1, d2; int16_t cubeVal; int8_t cubeOwn; };
 static Snap hist[32];
@@ -627,10 +628,10 @@ static uint32_t tapAt;  // when the last tap was handled (handover latency log)
 static void tumble(int d1, int d2, bool cpu) {
   if (cpu) Serial.printf("dice start %u ms after the tap\n", millis() - tapAt);
   tumbling = true; cpuDice = cpu;
-  for (int i = 0; i < 12; i++) {  // slowing down, ~0.9 s in all
+  for (int i = 0; i < 8; i++) {  // slowing down, ~0.4 s in all: a roll shouldn't feel like a wait
     dice[0] = random(1, 7); dice[1] = random(1, 7);
     redrawRegion(TRX, MIDY - TAP_H, W, MIDY + TAP_D);
-    delay(40 + i * 8);
+    delay(25 + i * 6);
   }
   dice[0] = d1; dice[1] = d2;
   tumbling = false;
@@ -1205,20 +1206,35 @@ void loop() {
     blinkOn = !blinkOn;
     redrawRegion(TRX, MIDY - TAP_H, W, MIDY + TAP_D + ss(14));
   } else if (phase == MOVE || phase == OFFER) blinkOn = true;
+  // Capacitive touch reports a clean position at once: act on the press.
   // Resistive touch: the first samples of a press are unreliable, so collect
   // the whole press and act on release at the median position.
   static int16_t sx[64], sy[64];
   static int ns = 0, idle = 0;
+  static bool held;  // capacitive: this press has been handled
   int32_t x, y;
-  if (touch_get(&x, &y)) {
+  bool down = touch_get(&x, &y);
+  if (!BOARD_TOUCH_CALIBRATION) {
+    if (down && !held) {
+      held = true;
+      uint32_t t0 = millis();
+      Phase before = phase;
+      if (netOk) tap(x, y);
+      if (touchLog) Serial.printf("touch %d,%d phase %d -> %d, handled in %u ms\n", x, y, before, phase, millis() - t0);
+      if (!menuOpen) display_cross(x, y);
+    } else if (!down) held = false;
+  } else if (down) {
     if (ns < 64) { sx[ns] = x; sy[ns] = y; ns++; }
     idle = 0;
-  } else if (ns && ++idle >= (BOARD_TOUCH_CALIBRATION ? 3 : 1)) {  // released (resistive: ~30 ms without contact)
+  } else if (ns && ++idle >= 3) {  // ~30 ms without contact = released
     int skip = ns > 4 ? 2 : 0, m = ns - skip;
     std::sort(sx + skip, sx + ns);
     std::sort(sy + skip, sy + ns);
     int tx = sx[skip + m / 2], ty = sy[skip + m / 2];
+    uint32_t t0 = millis();
+    Phase before = phase;
     if (netOk) tap(tx, ty);
+    if (touchLog) Serial.printf("touch %d,%d (%d samples) phase %d -> %d, handled in %u ms\n", tx, ty, ns, before, phase, millis() - t0);
     // Where the screen thinks you touched (gone at the next redraw).
     if (!menuOpen) {
       display_cross(tx, ty);
@@ -1230,6 +1246,7 @@ void loop() {
     if (!netOk && ch != 'd' && ch != 'k') ch = 0;  // nothing that evaluates without a net
     if (ch == 'v') verify();
     else if (ch == 'n') { newGame(); draw(); }
+    else if (ch == 'L') { touchLog = !touchLog; Serial.printf("touch log %s\n", touchLog ? "on" : "off"); }
     else if (ch == 'T') {  // touch test: print the raw readings for 10 s
       uint32_t t0 = millis(); bool was = false;
       while (millis() - t0 < 10000) {
