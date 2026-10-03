@@ -58,7 +58,8 @@ static int clipX0 = 0, clipX1 = W;  // columns being redrawn: skip shapes outsid
 // OFFER: the CPU has doubled you. RESIGN: you're choosing how much to resign.
 // RESOFFER: the CPU has offered to resign.
 // COUNTER: the CPU refused your resignation / claim and offered another deal.
-enum Phase { ROLL, MOVE, PASS, OVER, OFFER, DONE, RESIGN, RESOFFER, COUNTER };
+// CPU: the CPU is rolling and moving (no dialogs or prompts on screen).
+enum Phase { ROLL, MOVE, PASS, OVER, OFFER, DONE, RESIGN, RESOFFER, COUNTER, CPU };
 static BgBoard g, turnStart, cpuBefore;
 static Phase phase;
 static int dice[2];             // shown dice
@@ -682,6 +683,7 @@ static void gameOver(int pts, bool youWon, const char* how = nullptr) {
 // own turn only the status line changes, so the dice start tumbling at once.
 static void cpuTurn(int d1, int d2, bool full = true) {
   snprintf(msg, sizeof msg, "CPU rolls %d-%d...", d1, d2);
+  phase = CPU;  // clears any dialog (a take) and your DONE / PASS prompt
   nsubs = 0; sel = -1; cpuMarks = false;
   if (full) draw();
   tumble(d1, d2, true);
