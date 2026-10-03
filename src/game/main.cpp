@@ -1038,16 +1038,20 @@ static int hitSpot(int x, int y) {
   return y < MIDY ? 13 + c : 12 - c;
 }
 
+// The dice / prompt button (roll, DONE, pass, new game): the whole tray column,
+// top to bottom - nothing else in the tray is tappable at those times.
+static bool inTray(int x, int y) { return x >= TRX - ss(4) && y >= SB; }
+
 static void tap(int x, int y) {
   tapAt = millis();
   if (menuOpen) { menuTap(x, y); return; }
   if (y < SB + ss(4) && x < sx(40)) { menuOpen = true; sel = -1; npaths = 0; draw(); return; }
   if (phase == OVER) {  // only NEW GAME (the tray) starts the next game
-    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) { newGame(); draw(); }
+    if (inTray(x, y)) { newGame(); draw(); }
     return;
   }
   if (phase == PASS) {  // no legal move: the dice hand over, as for DONE
-    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) { endHumanTurn(); draw(); }
+    if (inTray(x, y)) { endHumanTurn(); draw(); }
     else { snprintf(msg, sizeof msg, "No legal move: tap the dice"); draw(); }
     return;
   }
@@ -1085,7 +1089,7 @@ static void tap(int x, int y) {
       if (canDouble()) { humanDouble(); draw(); }
       return;
     }
-    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) {
+    if (inTray(x, y)) {
       cpuMarks = false;
       int d1 = random(1, 7), d2 = random(1, 7);
       tumble(d1, d2, false);
@@ -1096,7 +1100,7 @@ static void tap(int x, int y) {
     return;
   }
   if (phase == DONE) {  // only the dice do anything now: hand over
-    if (x >= TRX && y >= MIDY - TAP_H && y <= MIDY + TAP_D) { endHumanTurn(); draw(); }
+    if (inTray(x, y)) { endHumanTurn(); draw(); }
     else { snprintf(msg, sizeof msg, "Tap the dice to finish"); draw(); }
     return;
   }
@@ -1152,6 +1156,7 @@ static void tap(int x, int y) {
     }
     if (found == -2) { snprintf(msg, sizeof msg, "Tap the checker to move first"); draw(); return; }
   }
+  if (src > 0 && src == sel) { draw(); return; }  // the selected checker again: keep it (no toggle)
   if (src > 0 && src != sel) {
     sel = src;
     uint32_t tp = micros();
